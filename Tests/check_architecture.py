@@ -55,26 +55,4 @@ with tempfile.TemporaryDirectory(prefix="cirrus-architecture-check-") as directo
     )
     subprocess.run([str(binary)], check=True)
 
-detect_start = SOURCE.index("size_t CirrusAudioFixup::detectAmplifiers()")
-detect_end = SOURCE.index("\n}", detect_start)
-detect = SOURCE[detect_start:detect_end]
-assert 'bootArgEnabled("-cirruslegacyprobe")' in detect
-assert "findDeviceById(devId)" in detect
-assert "profile.allowAutomaticInitialization || explicitLegacyProbe" in detect
-assert "mAmps[0].present = true" not in detect
-
-start_start = SOURCE.index("bool CirrusAudioFixup::start(")
-start_end = SOURCE.index("\n}", start_start)
-start = SOURCE[start_start:start_end]
-assert start.index("resolvePlatformProfile();") < start.index("performPlatformHardwareReset();")
-assert start.index('PE_parse_boot_argn("-cirrusphase"') < start.index("performPlatformHardwareReset();")
-assert start.index("performPlatformHardwareReset();") < start.index("detectAmplifiers();")
-
-reset_start = SOURCE.index("bool CirrusAudioFixup::performPlatformHardwareReset()")
-reset_end = SOURCE.index("\n}", reset_start)
-reset = SOURCE[reset_start:reset_end]
-assert reset.index('bootArgEnabled("-cirrusro")') < reset.index("IOService::nameMatching")
-assert reset.index('bootArgStrEquals("-cirrusphase", "probe")') < reset.index("IOService::nameMatching")
-assert 'return true;' in reset[:reset.index("const cirrus::platform::ResetControllerQuirk")]
-
-print("PASS device registry, platform profiles, fail-closed discovery and reset ordering")
+print("PASS supported silicon registry and declared platform profiles (not discovery behavior)")

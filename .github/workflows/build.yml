@@ -38,22 +38,7 @@ jobs:
           python3 --version
 
       - name: Run host regression test suite
-        run: |
-          python3 Tests/reproduce_host.py
-          python3 Tests/check_registers.py
-          python3 Tests/check_transport.py
-          python3 Tests/check_diagnostics.py
-          python3 Tests/check_hda.py
-          python3 Tests/check_calibration.py
-          python3 Tests/check_bringup.py
-          python3 Tests/check_runtime.py
-          python3 Tests/check_audio_events.py
-          python3 Tests/check_architecture.py
-          python3 Tests/check_release.py
-          python3 Tests/check_build_policy.py
-          python3 Tests/check_tools.py
-          python3 Tests/check_tuning.py
-          python3 Tests/check_windows_payloads.py
+        run: python3 Tests/run.py
 
       - name: Build Release kext
         run: |
@@ -88,6 +73,7 @@ jobs:
             BUNDLE="${GITHUB_WORKSPACE}/build/${MODE}/CirrusAudioFixup.kext"
             plutil -lint "${BUNDLE}/Contents/Info.plist"
             python3 Tools/release_metadata.py --bundle "$BUNDLE"
+            python3 Tools/verify_kext_vtables.py "$BUNDLE/Contents/MacOS/CirrusAudioFixup"
             lipo "${BUNDLE}/Contents/MacOS/CirrusAudioFixup" -verify_arch x86_64
             SYMBOLS="${BUNDLE}.dSYM/Contents/Resources/DWARF/CirrusAudioFixup"
             test -f "$SYMBOLS"
@@ -104,6 +90,7 @@ jobs:
           file "${GITHUB_WORKSPACE}/build/Debug/CirrusAudioFixup.kext/Contents/MacOS/CirrusAudioFixup"
 
       - name: Package kext bundles
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           cd "${GITHUB_WORKSPACE}/build/Release"
           zip -qry "${GITHUB_WORKSPACE}/CirrusAudioFixup-RELEASE.zip" CirrusAudioFixup.kext
@@ -116,27 +103,30 @@ jobs:
           ls -lh CirrusAudioFixup-*.zip
 
       - name: Upload Release artifact
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: CirrusAudioFixup-RELEASE-${{ github.sha }}
           path: CirrusAudioFixup-RELEASE.zip
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
 
       - name: Upload Debug artifact
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: CirrusAudioFixup-DEBUG-${{ github.sha }}
           path: CirrusAudioFixup-DEBUG.zip
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
 
       - name: Upload matching debug symbols
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: CirrusAudioFixup-SYMBOLS-${{ github.sha }}
           path: CirrusAudioFixup-SYMBOLS.zip
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
 
   release:

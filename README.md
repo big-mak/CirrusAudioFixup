@@ -242,6 +242,7 @@ Flags with a value of `0` are treated as disabled. Debug builds enable routine l
 | Argument | Actual behavior |
 | --- | --- |
 | `-cirrusoff` | Reject attachment before hardware initialization |
+| `-cirrusirq` | Experimental reference-board GPIO84 protection IRQ, with polling backup; disabled by default until target delivery and sleep/wake validation |
 | `-cirrusdbg` | Enable routine `IOLog` messages in Release; already enabled by default in Debug |
 | `-cirrusro` | Skip GPIO reset, initialization and register writes; collect a one-shot register snapshot. Reads still send an I2C register-address prefix |
 | `-cirrusnodsp` | Skip firmware and coefficient upload; use the explicit DAC bypass path without DSP acoustic protection |
@@ -358,22 +359,12 @@ Repeat with `Debug` and `build/Debug` for the diagnostic build. These are unsign
 Host tests require Python 3, Bash and a C++17 compiler available as `g++` (Bash is included with macOS; on Windows the tools test uses Git for Windows Bash):
 
 ```bash
-python3 Tests/reproduce_host.py
-python3 Tests/check_registers.py
-python3 Tests/check_transport.py
-python3 Tests/check_diagnostics.py
-python3 Tests/check_hda.py
-python3 Tests/check_calibration.py
-python3 Tests/check_tuning.py
-python3 Tests/check_windows_payloads.py
-python3 Tests/check_bringup.py
-python3 Tests/check_runtime.py
-python3 Tests/check_audio_events.py
-python3 Tests/check_architecture.py
-python3 Tests/check_release.py
-python3 Tests/check_build_policy.py
-python3 Tests/check_tools.py
+python3 Tests/run.py
+# Optional Windows package audit tool regression:
+python3 Tests/run.py --audit
 ```
+
+Tests are development tools and are not shipped inside the kext. The maintained suite is shared by local builds and CI; temporary fixtures are removed after each test. CI packages downloadable bundles only for version tags or manual runs, with seven-day retention for workflow artifacts. Release assets remain attached to the release.
 
 Injected failures deliberately print errors. Check each process's exit code and final PASS result. These tests exercise production code with mocked buses and IOKit objects; they cannot establish a real I2C transaction, loaded kext or speaker output.
 

@@ -19,10 +19,7 @@ for dependency in MacKernelSDK/Headers/IOKit/IOService.h Lilu/Lilu/Headers/kern_
 done
 
 # Verify the source and real embedded payloads before spending time on Xcode.
-for test in Tests/check_*.py; do
-    python3 "$test"
-done
-python3 Tests/reproduce_host.py
+python3 Tests/run.py
 python3 Tools/release_metadata.py
 
 for mode in Debug Release; do
@@ -35,6 +32,7 @@ for mode in Debug Release; do
     symbols="$bundle.dSYM/Contents/Resources/DWARF/CirrusAudioFixup"
     plutil -lint "$bundle/Contents/Info.plist"
     python3 Tools/release_metadata.py --bundle "$bundle"
+    python3 Tools/verify_kext_vtables.py "$binary"
     lipo "$binary" -verify_arch x86_64
     [[ -f "$symbols" ]] || { echo "error: missing symbols for $mode" >&2; exit 1; }
     binary_uuid="$(dwarfdump --uuid "$binary" | awk '{print $2}')"

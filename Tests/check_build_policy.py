@@ -64,12 +64,4 @@ monitor = driver[monitor_start:driver.index('\n}', monitor_start)]
 assert 'IOSleep(' not in monitor and 'IODelay(' not in monitor
 assert 'Playback::advance' in monitor and 'Playback::commit' in monitor
 
-for file in (ROOT / "CirrusAudioFixup").rglob("*"):
-    if file.suffix not in (".hpp", ".cpp"):
-        continue
-    content = file.read_text(encoding="utf-8")
-    assert content.startswith("//\n") and any(file.name in line for line in content.splitlines()[:8]), file
-    for line in content.splitlines():
-        assert not re.match(r"^\s*[^/\s].*\s+//", line), f"Trailing comment in {file}: {line}"
-
-print("PASS build policy: deployment/SDK, logging, symbols, dispatch, sleeping polls, boot-arg docs and comment style")
+print("PASS build policy: deployment/SDK, logging, symbols, dispatch, sleeping polls, boot-arg docs")

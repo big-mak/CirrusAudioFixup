@@ -70,7 +70,7 @@ CirrusAudioFixup observes the host output stream and manages the amplifier lifec
 
 ## Hardware and macOS scope
 
-The implemented backend is CS35L41. The current personality matches a `VoodooI2CDeviceNub` whose `IOName` is `CLSA0100`.
+The implemented backend is CS35L41. The current personality matches a `VoodooI2CDeviceNub` whose `IOName` is `CLSA0100`. Hardware initialization additionally requires HDA PCI subsystem identity `17AA:382B` or `17AA:3847` before the reference GPIO reset. Missing or different identity blocks initialization; firmware overrides do not override this wiring policy. Both configured amplifiers must be discovered before either is initialized.
 
 | Configuration | What the source currently provides |
 | --- | --- |
@@ -247,7 +247,7 @@ Flags with a value of `0` are treated as disabled. Debug builds enable routine l
 | `-cirrusro` | Skip GPIO reset, initialization and register writes; collect a one-shot register snapshot. Reads still send an I2C register-address prefix |
 | `-cirrusnodsp` | Skip firmware and coefficient upload; use the explicit DAC bypass path without DSP acoustic protection |
 | `-cirrusphase=<name>` | Stop after a selected initialization stage; playback stays disabled |
-| `-cirruslegacyprobe` | Permit fixed-address discovery outside automatic profile policy; diagnostic use only, not evidence of board support |
+| `-cirruslegacyprobe` | Permit read-only fixed-address discovery outside automatic profile policy; never invent endpoints or authorize initialization |
 | `-cirrusprobe` | Record the flag in `CirrusBootArgParsed`; currently does not enable a separate transaction-log mode |
 | `-cirrusdelay=<ms>` | Set the read-only snapshot delay, default 100 ms. Does not replace the normal 15 ms startup wait |
 | `-cirrusdiag` | Enable additional initialization register snapshots and CRC checks; essential runtime checks remain active without it |

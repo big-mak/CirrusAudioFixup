@@ -36,6 +36,7 @@ public:
     static CirrusAudioEventSource* create(OSObject* owner, IOService* controller, Handler handler);
     static bool hooksReady();
     bool attach();
+    void refreshRoute();
     void detach();
     bool checkForWork() override;
     void free() override;

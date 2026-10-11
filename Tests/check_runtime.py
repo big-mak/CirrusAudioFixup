@@ -121,6 +121,7 @@ LEGACY_CONSTANTS = r'''
 '''
 
 preamble = r'''
+#include "Platform/PlatformProfile.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
@@ -217,6 +218,8 @@ struct IOInterruptEventSource {
 #define OSDynamicCast(type, object) reinterpret_cast<type*>(object)
 class CirrusAudioFixup {
 public:
+    bool mPlatformAuthorized=true;
+    const cirrus::platform::PlatformProfile* mPlatformProfile=cirrus::platform::findPlatformProfile("CLSA0100");
     IOInterruptEventSource* mAmpInterrupt=nullptr;
     size_t mAmpCount{2};
     CS35L41Amp mAmps[2]{};

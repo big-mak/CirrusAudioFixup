@@ -123,22 +123,24 @@ IOService* CirrusAudioFixup::probe(IOService* provider, SInt32* score) {
 bool CirrusAudioFixup::performPlatformHardwareReset() {
     if (bootArgEnabled("-cirrusro") || bootArgStrEquals("-cirrusphase", "probe"))
         return true;
+    if (!mPlatformAuthorized)
+        return false;
     const cirrus::platform::ResetControllerQuirk* quirkPtr = mPlatformProfile ? mPlatformProfile->resetQuirk : nullptr;
     if (quirkPtr) {
         const cirrus::platform::ResetControllerQuirk& quirk = *quirkPtr;
         OSDictionary* dict = IOService::nameMatching(quirk.controllerName);
         if (!dict)
-            return true;
+            return false;
 
         OSIterator* iter = IOService::getMatchingServices(dict);
         dict->release();
         if (!iter)
-            return true;
+            return false;
 
         IOService* controller = OSDynamicCast(IOService, iter->getNextObject());
         if (!controller) {
             iter->release();
-            return true;
+            return false;
         }
 
         bool verified = false;
@@ -204,6 +206,16 @@ void CirrusAudioFixup::resolvePlatformProfile() {
                    mPlatformProfile->name);
     }
 
+    uint32_t pciSubsystemId = 0;
+    IOService* controller = getAudioController();
+    if (auto* pci = OSDynamicCast(IOPCIDevice, controller))
+        pciSubsystemId = (uint32_t(pci->configRead16(kIOPCIConfigSubSystemVendorID)) << 16) |
+                         pci->configRead16(kIOPCIConfigSubSystemID);
+    if (controller)
+        controller->release();
+    mPlatformAuthorized = cirrus::platform::permitsHardwareInitialization(*mPlatformProfile, pciSubsystemId);
+    setProperty("Cirrus_Platform_PCI_SSID", uint64_t(pciSubsystemId), 32);
+    setProperty("Cirrus_Platform_Authorized", mPlatformAuthorized ? kOSBooleanTrue : kOSBooleanFalse);
     setProperty("Cirrus_Platform_Profile", mPlatformProfile->name);
     setProperty("Cirrus_Platform_ACPI_HID", acpiHid ? acpiHid : "unknown");
     CIRRUS_LOG("platform profile selected: %s (hid=%s, endpoints=%lu)", mPlatformProfile->name, acpiHid ? acpiHid : "unknown",
@@ -309,6 +321,16 @@ void CirrusAudioFixup::fullDriverFlow() {
     CIRRUS_LOG("starting hardware initialization flow");
     if (bootArgEnabled("-cirrusro"))
         return;
+    if (!mPlatformAuthorized || !mPlatformProfile || mAmpCount != mPlatformProfile->endpointCount) {
+        publishDriverVerdict();
+        return;
+    }
+    for (size_t i = 0; i < mAmpCount; ++i) {
+        if (!mAmps[i].present) {
+            publishDriverVerdict();
+            return;
+        }
+    }
 
     for (size_t i = 0; i < mAmpCount; ++i) {
         AmplifierState& amp = mAmps[i];
@@ -562,7 +584,8 @@ void CirrusAudioFixup::handlePowerChange(bool powered) {
         if (mProbeTimer)
             mProbeTimer->cancelTimeout();
 
-        if (!bootArgEnabled("-cirrusro")) {
+        if (mPlatformAuthorized && mPlatformProfile && mAmpCount == mPlatformProfile->endpointCount &&
+            !bootArgEnabled("-cirrusro")) {
             for (auto& amp : mAmps) {
                 if (!amp.present)
                     continue;
@@ -728,7 +751,8 @@ void CirrusAudioFixup::dumpProviderProperties(IOService* provider) {
 bool CirrusAudioFixup::setupAmplifierInterrupt() {
     setProperty("Cirrus_Amp_IRQ_Mode", "POLLING");
     if (!bootArgEnabled("-cirrusirq") || bootArgEnabled("-cirrusro") ||
-        mDebugPhaseHalted || !mProvider || !mWorkLoop || !mPlatformProfile ||
+        mDebugPhaseHalted || !mPlatformAuthorized || !mProvider || !mWorkLoop || !mPlatformProfile ||
+        mAmpCount != mPlatformProfile->endpointCount ||
         strcmp(mPlatformProfile->name, "lenovo-clsa0100-cs35l41"))
         return false;
     auto* mode = OSDynamicCast(OSString, mProvider->getProperty("Interrupt Mode"));
@@ -1335,7 +1359,7 @@ size_t CirrusAudioFixup::detectAmplifiers() {
 
     const cirrus::platform::PlatformProfile& profile = mPlatformProfile ? *mPlatformProfile : cirrus::platform::defaultPlatformProfile();
     bool explicitLegacyProbe = bootArgEnabled("-cirruslegacyprobe");
-    size_t candidateCount = profile.allowAutomaticInitialization || explicitLegacyProbe
+    size_t candidateCount = mPlatformAuthorized || explicitLegacyProbe
                                 ? (profile.endpointCount < kMaxAmps ? profile.endpointCount : kMaxAmps)
                                 : 0;
 
@@ -1370,21 +1394,7 @@ size_t CirrusAudioFixup::detectAmplifiers() {
     }
     mProbingAmplifiers = false;
 
-    if (detected == 0 && explicitLegacyProbe) {
-        size_t fallbackCount = candidateCount < 2 ? candidateCount : 2;
-        for (size_t i = 0; i < fallbackCount; ++i) {
-            mAmps[i].name = profile.endpoints[i].name;
-            mAmps[i].address = profile.endpoints[i].address;
-            mAmps[i].model = profile.amplifierModel;
-            mAmps[i].channel = profile.endpoints[i].channel;
-            mAmps[i].present = true;
-        }
-        detected = fallbackCount;
-        setProperty("Cirrus_Discovery_Fallback", kOSBooleanTrue);
-        CIRRUS_LOG("legacy amplifier fallback explicitly enabled for %lu endpoint(s)", detected);
-    } else {
-        setProperty("Cirrus_Discovery_Fallback", kOSBooleanFalse);
-    }
+    setProperty("Cirrus_Discovery_Fallback", kOSBooleanFalse);
 
     mAmpCount = detected;
     setProperty("Cirrus_Detected_Amplifiers", (uint64_t)mAmpCount, 32);
@@ -1775,8 +1785,14 @@ bool CirrusAudioFixup::stopRuntimePlayback(AmplifierState& amp) {
 }
 
 bool CirrusAudioFixup::setupAudioEvents() {
-    if (mAudioEvents || !mHdaPci || !cirrus::platform::hda::AudioEventSource::hooksReady())
-        return mAudioEvents != nullptr;
+    if (mAudioEvents) {
+        mAudioEvents->refreshRoute();
+        mAudioState = mAudioEvents->snapshot();
+        setProperty("Cirrus_Audio_Event_Mode", mAudioState.routeKnown ? "IOAUDIO_FAMILY_EVENTS" : "IOAUDIO_HOOKS_WAITING_FOR_OUTPUT");
+        return true;
+    }
+    if (!mHdaPci || !cirrus::platform::hda::AudioEventSource::hooksReady())
+        return false;
     auto* source = cirrus::platform::hda::AudioEventSource::create(this, mHdaPci, audioEventReceived);
     if (!source)
         return false;
@@ -2634,6 +2650,9 @@ void CirrusAudioFixup::captureFailureSnapshot(AmplifierState& amp, DiagnosticFai
 // A fault takes precedence over a deliberate debug halt. READY_DSP describes
 // the driver's verified state; speaker routing remains a separate check.
 void CirrusAudioFixup::publishDriverVerdict() {
+    bool topologyComplete = mPlatformProfile && mAmpCount == mPlatformProfile->endpointCount;
+    for (size_t i = 0; i < mAmpCount; ++i)
+        topologyComplete &= mAmps[i].present;
     bool allInitialized = (mAmpCount > 0);
     bool allDsp = (mAmpCount > 0);
     bool anyFaulted = false;
@@ -2651,7 +2670,9 @@ void CirrusAudioFixup::publishDriverVerdict() {
     }
     const char* verdict = !mPowerAvailable                 ? "SUSPENDED"
                           : bootArgEnabled("-cirrusro")    ? "READ_ONLY"
+                          : !mPlatformAuthorized           ? "UNSUPPORTED_PLATFORM"
                           : anyFaulted                     ? "FAULT_LATCHED"
+                          : !topologyComplete              ? "INCOMPLETE_TOPOLOGY"
                           : identityPending                ? "WAITING_FOR_CODEC_IDENTITY"
                           : mDebugPhaseHalted               ? "DEBUG_PHASE_HALTED"
                           : !allInitialized                ? "FAILED_INIT"

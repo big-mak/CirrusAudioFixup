@@ -201,6 +201,7 @@ private:
     size_t mAmpCount{0};
     AmplifierState mAmps[kMaxAmps]{};
     const cirrus::platform::PlatformProfile* mPlatformProfile{nullptr};
+    bool mPlatformAuthorized{false};
 
     static const size_t kTraceBufferSize = 1024;
     cirrus::diagnostics::TraceEntry mTraceBuffer[kTraceBufferSize];

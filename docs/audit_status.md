@@ -197,3 +197,26 @@ SSID, protection/transport failure or identity timeout remains a fault. No
 reference SSID is automatically substituted. Host regressions cover actual
 registry lookup, deferred stereo bringup, late identity, no repeated init and
 bounded timeout. The new installed bundle still requires a target reboot test.
+
+## Compatibility hardening on 2026-10-11
+
+The live reference machine remains READY_DSP with both endpoints safe-idle and
+protection OK before these changes. The new source gates board reset and full
+initialization on CLSA0100 plus HDA PCI subsystem 17AA382B/17AA3847; the live
+machine exposes 17AA382B. Codec firmware identity remains a separate deferred
+lookup. An absent controller identity disables initialization rather than guessing.
+Legacy discovery performs reads only on unsupported boards and no longer invents
+present endpoints. A partial pair reports INCOMPLETE_TOPOLOGY and performs no
+initialization. Unsupported-board PM and IRQ paths do not configure the amps.
+Output selectors published after hook attachment are re-seeded while route is
+unknown, with live observations retaining precedence.
+
+Existing maintained suites now execute production discovery for missing/unknown
+endpoints, production bringup/PM for unsupported and incomplete boards, and
+production event-source refresh for late selectors. Hardware cold boot and
+sleep/wake of the resulting binary still require validation. Debug and Release builds passed the maintained host suites, metadata, x86_64,
+dSYM UUID and OpenCore vtable checks. The Release binary SHA-256 is
+`eac87c472f9731acde14584156df7610c862389a2dfb187ae4fd7ec5c46a528f`.
+The verified bundle was copied to EFI after backing up the working bundle under
+`build/LoadDebug/hardening/CirrusAudioFixup.before-hardening.kext`. The installed
+binary matches the built hash; reboot/load and hardware validation are pending.

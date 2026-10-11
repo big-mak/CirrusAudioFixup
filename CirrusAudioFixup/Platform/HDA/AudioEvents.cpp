@@ -209,6 +209,18 @@ bool CirrusAudioEventSource::attach() {
     IOLockUnlock(listenersLock);
     if (!attached)
         return false;
+    refreshRoute();
+    return true;
+}
+
+// Retry seeding while route publication is pending. A live hook observation
+// wins over stale seed data under the mailbox lock in observe().
+void CirrusAudioEventSource::refreshRoute() {
+    IOLockLock(mMailboxLock);
+    bool needed = mAttached && !mState.routeKnown;
+    IOLockUnlock(mMailboxLock);
+    if (!needed)
+        return;
     // Seed from current registry state: the selector may have changed before
     // the amplifier service attached, with no later event until the next jack
     // operation. Use the same validation as live observations.
@@ -227,7 +239,6 @@ bool CirrusAudioEventSource::attach() {
         }
         iterator->release();
     }
-    return true;
 }
 
 void CirrusAudioEventSource::detach() {

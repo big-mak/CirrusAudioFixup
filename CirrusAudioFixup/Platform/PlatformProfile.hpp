@@ -75,6 +75,14 @@ inline const PlatformProfile* findPlatformProfile(const char* acpiHid) {
     return nullptr;
 }
 
+// PCI subsystem identity is available before the codec publishes its SSID.
+// This allowlist authorizes reference reset wiring, not generic CS35L41 support.
+inline bool permitsHardwareInitialization(const PlatformProfile& profile, uint32_t pciSubsystemId) {
+    return profile.allowAutomaticInitialization && profile.acpiHid &&
+           strcmp(profile.acpiHid, "CLSA0100") == 0 &&
+           (pciSubsystemId == 0x17AA382B || pciSubsystemId == 0x17AA3847);
+}
+
 inline const PlatformProfile& defaultPlatformProfile() {
     return kSafeUnknownPlatform;
 }

@@ -15,6 +15,7 @@ names = ['fullDriverFlow', 'initializeCS35L41', 'initCodec', 'handlePowerChange'
 amp = HEADER[HEADER.index('struct AmplifierState {'):HEADER.index('struct FirmwareImage;')]
 
 preamble = r'''
+#include "Platform/PlatformProfile.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
@@ -56,6 +57,8 @@ struct HDAStreamState {
 
 class CirrusAudioFixup {
 public:
+    bool mPlatformAuthorized=true;
+    const cirrus::platform::PlatformProfile* mPlatformProfile=cirrus::platform::findPlatformProfile("CLSA0100");
     size_t mAmpCount{2};
     CS35L41Amp mAmps[2]{};
     Timer* mProbeTimer=nullptr;
@@ -88,7 +91,7 @@ public:
     CirrusAudioFixup() {
         mAmps[0].name="L"; mAmps[0].address=0;
         mAmps[1].name="R"; mAmps[1].address=1;
-        for(auto& a:mAmps) a.model=cirrus::core::CodecModel::CS35L41;
+        for(auto& a:mAmps) { a.model=cirrus::core::CodecModel::CS35L41; a.present=true; }
         mAmps[1].channel=cirrus::core::AudioChannel::Right;
     }
     static const char* failureName(DiagnosticFailure) { return "failure"; }
@@ -286,6 +289,14 @@ int main() {
         check(d.properties["Cirrus_Driver_Verdict"]=="FAULT_LATCHED","failed rollback verdict");
         check(d.halts[0]>0,"core halt still attempted after output cleanup fails");
     }
+    CirrusAudioFixup single; single.mAmpCount=1; single.fullDriverFlow();
+    check(single.uploads==0 && single.properties["Cirrus_Driver_Verdict"]=="INCOMPLETE_TOPOLOGY", "missing peer blocks pair initialization");
+    CirrusAudioFixup unsupportedBoard; unsupportedBoard.mPlatformAuthorized=false; unsupportedBoard.fullDriverFlow();
+    check(unsupportedBoard.uploads==0 && unsupportedBoard.resets[0]==0 && unsupportedBoard.properties["Cirrus_Driver_Verdict"]=="UNSUPPORTED_PLATFORM", "unsupported board performs no reset or upload");
+    unsupportedBoard.handlePowerChange(false);
+    check(unsupportedBoard.stops[0]==0 && unsupportedBoard.halts[0]==0,"unsupported board suspend does not write hardware");
+    single.handlePowerChange(false);
+    check(single.stops[0]==0 && single.halts[0]==0,"incomplete uninitialized pair suspend does not write hardware");
     CirrusAudioFixup normal; normal.fullDriverFlow();
     check(normal.uploads==2 && normal.properties["Cirrus_Driver_Verdict"]=="READY_DSP","normal DSP startup");
     normal.handlePowerChange(false); normal.handlePowerChange(true);

@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Fixed
+- Authorize reference GPIO reset and initialization with HID plus HDA PCI subsystem identity; firmware overrides and legacy probes do not authorize another board.
+- Require the complete configured amplifier topology before initialization and readiness; legacy probing no longer invents endpoints after failed reads.
+- Retry output-selector registry seeding while the route is unknown without replacing a newer live observation.
 - Advance runtime PUP/PDN, PLL and mailbox waits through timer-driven phases with monotonic deadlines; retain synchronous PM quiesce and initialization.
 - Require both speaker endpoints to prepare before unmute, cancel stale transitions, and roll back the whole pair after a failed commit.
 - Reject unsupported amplifier models before CS35L41 runtime register access.

@@ -137,6 +137,13 @@ void selector(IOService& control,uint32_t subtype,uint32_t value) {
 int main() {
     assert(CirrusAudioFixup_start(nullptr,nullptr)==KERN_SUCCESS);
     assert(AudioEventSource::hooksReady());
+    IOService lateRoot,lateEngine,lateControl;
+    auto* late=AudioEventSource::create(&lateRoot,&lateRoot,receive);
+    assert(late && late->attach() && !late->snapshot().routeKnown);
+    child(lateEngine,lateRoot,"IOAudioEngine"); child(lateControl,lateEngine,"IOAudioSelectorControl");
+    selector(lateControl,0x6F757470,0x6973706B);
+    late->refreshRoute(); assert(late->snapshot().routeKnown && late->snapshot().speakers);
+    late->detach(); late->free(); delete late;
     IOService root,engine,control,input,otherEngine,otherControl,externalRoot,externalEngine,externalControl;
     child(engine,root,"IOAudioEngine"); child(control,engine,"IOAudioSelectorControl");
     child(input,engine,"IOAudioSelectorControl");

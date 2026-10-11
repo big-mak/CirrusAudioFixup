@@ -26,6 +26,7 @@
 #include "Transport/VoodooI2CTransport.hpp"
 
 #include <IOKit/IOCommandGate.h>
+#include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOTimerEventSource.h>
@@ -64,6 +65,8 @@ struct AmplifierState {
     const uint8_t* binData{nullptr};
     size_t binSize{0};
     bool firmwareValidated{false};
+    bool firmwareIdentityPending{false};
+    uint64_t firmwareIdentityDeadlineMs{0};
     // Reset by resource discovery on every cold start and wake. This is the
     // board/channel tuning gain, independent of the host volume slider.
     uint32_t tuningPcmGain{17};
@@ -147,6 +150,7 @@ private:
     void initializeCS35L41(AmplifierState& amp);
 
     void runBackgroundMonitor();
+    bool retryFirmwareIdentity();
     bool setupAudioEvents();
     void teardownAudioEvents();
     static void audioEventReceived(OSObject* owner, const cirrus::platform::hda::AudioEventState& state);
@@ -169,6 +173,12 @@ private:
     bool mNeedsReinitialization{false};
     bool mDebugPhaseHalted{false};
     bool stopAfterDebugStage(const char* stage);
+
+    IOInterruptEventSource* mAmpInterrupt{nullptr};
+    bool setupAmplifierInterrupt();
+    bool configureAmplifierInterrupt();
+    void teardownAmplifierInterrupt();
+    static void amplifierInterruptReceived(OSObject*, IOInterruptEventSource*, int);
 
     bool setupPowerManagement(IOService* provider);
     void handlePowerChange(bool powered);

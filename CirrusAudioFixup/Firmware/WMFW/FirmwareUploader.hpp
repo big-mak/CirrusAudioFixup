@@ -12,38 +12,7 @@
 #include "Firmware/WMFW/WMFWParser.hpp"
 #include "Support/Logging.hpp"
 
-#define MAX_UPLOAD_TRANSACTIONS 1024
-
-struct UploadPolicy {
-    uint32_t maxPayloadBytes;
-    bool alignRegister;
-    bool alignPayload;
-};
-
-struct UploadTransaction {
-    uint32_t dspRegister;
-    uint32_t firmwareAddress;
-    uint32_t payloadOffset;
-    uint32_t size;
-    const uint8_t* payload;
-};
-
-struct UploadPlan {
-    RegionType regionType;
-    uint32_t regionIndex;
-    UploadTransaction transactions[MAX_UPLOAD_TRANSACTIONS];
-    uint32_t transactionCount;
-    uint32_t totalSize;
-    uint32_t planCrc;
-};
-
-struct UploadStats {
-    uint32_t writeMs;
-    uint32_t readbackMs;
-    uint32_t crcMs;
-    uint32_t totalMs;
-    uint32_t retries;
-};
+#include "Firmware/WMFW/UploadPlan.hpp"
 
 class CirrusFirmwareUploadPlanner {
 public:

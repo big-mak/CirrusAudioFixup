@@ -34,6 +34,7 @@ struct ShutdownTransition {
 };
 
 struct PlaybackTransition {
+    uint64_t prepareStartedMs{0};
     PlaybackPhase phase{PlaybackPhase::Idle};
     uint64_t deadlineMs{0};
     uint32_t generation{0};
@@ -73,17 +74,20 @@ class Playback final {
     }
 
     static PlaybackProgress mailbox(core::RegisterIO& io, PlaybackTransition& state, uint64_t now, uint64_t (*clock)()) {
-        if (now >= state.deadlineMs)
-            return fail(state, diagnostics::DIAG_DSP_MAILBOX, 0x13004, 0, state.actual);
         uint32_t status = 0;
         if (!io.read(0x13004, &status))
             return fail(state, diagnostics::DIAG_DSP_MAILBOX, 0x13004);
         state.actual = status;
-        if (sampleTime(now, clock) >= state.deadlineMs)
-            return fail(state, diagnostics::DIAG_DSP_MAILBOX, 0x13004, 0, status);
+        // Like Linux polling, observe acknowledgement before deciding timeout.
+        // A delayed workloop or the other stereo endpoint may consume the wait
+        // window while the DSP has already completed the command.
         if (status == 0xFFFFFFFFU || status == 0x00FFFFFFU)
             return fail(state, diagnostics::DIAG_DSP_MAILBOX, 0x13004, 0, status);
-        return status == 0 ? PlaybackProgress::Prepared : PlaybackProgress::Pending;
+        if (status == registers::kStatusMailboxRunning)
+            return PlaybackProgress::Prepared;
+        if (sampleTime(now, clock) >= state.deadlineMs)
+            return fail(state, diagnostics::DIAG_DSP_MAILBOX, 0x13004, 0, status);
+        return PlaybackProgress::Pending;
     }
 
 public:
@@ -137,18 +141,18 @@ public:
             return PlaybackProgress::Pending;
         }
         case ShutdownPhase::Pdn: {
-            if (!state.pdnDone && now < state.deadlineMs) {
+            if (!state.pdnDone) {
                 uint32_t irq = 0;
                 if (!io.read(0x10010, &irq)) {
                     failed(DIAG_IDLE_ROLLBACK, 0x10010);
                 } else if (irq & 0x00800000) {
                     state.pdnDone = true;
                     write(0x10010, 0x00800000);
-                } else {
+                } else if (sampleTime(now, clock) < state.deadlineMs) {
                     return PlaybackProgress::Pending;
-                }
-                if (sampleTime(now, clock) >= state.deadlineMs)
+                } else {
                     failed(DIAG_POWER_DOWN_TIMEOUT, 0x10010, irq);
+                }
             }
             if (!state.pdnDone && state.failure == DIAG_OK)
                 failed(DIAG_POWER_DOWN_TIMEOUT, 0x10010);
@@ -174,10 +178,9 @@ public:
             uint32_t status = 0;
             uint32_t expected = state.phase == ShutdownPhase::Pause ? registers::kStatusMailboxPaused
                                                                   : registers::kStatusMailboxRunning;
-            bool readable = now < state.deadlineMs && io.read(0x13004, &status);
-            readable = readable && sampleTime(now, clock) < state.deadlineMs;
+            bool readable = io.read(0x13004, &status);
             bool error = status == 0xFFFFFFFFU || status == 0x00FFFFFFU;
-            if (readable && !error && status != expected)
+            if (readable && !error && status != expected && sampleTime(now, clock) < state.deadlineMs)
                 return PlaybackProgress::Pending;
             bool acknowledged = readable && !error && status == expected;
             if (!acknowledged)
@@ -219,6 +222,7 @@ public:
         using namespace diagnostics;
         switch (state.phase) {
         case PlaybackPhase::Idle: {
+            state.prepareStartedMs = sampleTime(now, clock);
             // Keep digital output muted until the service commits the pair.
             const uint32_t common[][2] = {
                 {0x6000, 0xA678}, {0x6C04, 0}, {0x2C04, 0x430}, {0x2C08, 3}, {0x2C0C, 3},
@@ -267,18 +271,17 @@ public:
             return PlaybackProgress::Pending;
         }
         case PlaybackPhase::Pup: {
-            if (now >= state.deadlineMs)
-                return fail(state, DIAG_POWER_UP_TIMEOUT, 0x10010, 0x01000000, state.actual);
             uint32_t irq = 0;
             if (!io.read(0x10010, &irq))
                 return fail(state, DIAG_PLAYBACK_INVARIANT, 0x10010);
             state.actual = irq;
-            if (sampleTime(now, clock) >= state.deadlineMs)
-                return fail(state, DIAG_POWER_UP_TIMEOUT, 0x10010, 0x01000000, irq);
             if (irq & registers::kMaskProtectionFault)
                 return fail(state, DIAG_AMP_PROTECTION, 0x10010, 0, irq);
-            if (!(irq & 0x01000000))
+            if (!(irq & 0x01000000)) {
+                if (sampleTime(now, clock) >= state.deadlineMs)
+                    return fail(state, DIAG_POWER_UP_TIMEOUT, 0x10010, 0x01000000, irq);
                 return PlaybackProgress::Pending;
+            }
             if (!io.write(0x10010, 0x01000000))
                 return fail(state, DIAG_PLAYBACK_INVARIANT, 0x10010);
             if (dsp && firmwareVersion > 0x001C00) {
@@ -307,16 +310,15 @@ public:
             return result;
         }
         case PlaybackPhase::Pll: {
-            if (now >= state.deadlineMs)
-                return fail(state, DIAG_PLL_UNLOCKED, 0x10098, 2, state.actual);
             uint32_t pll = 0;
             if (!io.read(0x10098, &pll))
                 return fail(state, DIAG_PLAYBACK_INVARIANT, 0x10098);
             state.actual = pll;
-            if (sampleTime(now, clock) >= state.deadlineMs)
-                return fail(state, DIAG_PLL_UNLOCKED, 0x10098, 2, pll);
-            if (!(pll & 2))
+            if (!(pll & 2)) {
+                if (sampleTime(now, clock) >= state.deadlineMs)
+                    return fail(state, DIAG_PLL_UNLOCKED, 0x10098, 2, pll);
                 return PlaybackProgress::Pending;
+            }
             uint32_t pwr1 = 0, pwr2 = 0, dac = 0, asp = 0;
             if (!io.read(0x2014, &pwr1) || !io.read(0x2018, &pwr2) ||
                 !io.read(0x4C00, &dac) || !io.read(0x4800, &asp) || !(pwr1 & 1) ||

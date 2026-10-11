@@ -148,17 +148,16 @@ extern "C" __attribute__((visibility("default"))) kern_return_t CirrusAudioFixup
     return KERN_SUCCESS;
 }
 
-namespace cirrus::platform::hda {
-OSDefineMetaClassAndStructors(AudioEventSource, IOEventSource)
+OSDefineMetaClassAndStructors(CirrusAudioEventSource, IOEventSource)
 
-bool AudioEventSource::hooksReady() {
+bool CirrusAudioEventSource::hooksReady() {
     return __atomic_load_n(&controlHook, __ATOMIC_ACQUIRE) && __atomic_load_n(&engineHook, __ATOMIC_ACQUIRE);
 }
 
-AudioEventSource* AudioEventSource::create(OSObject* target, IOService* controller, Handler handler) {
+CirrusAudioEventSource* CirrusAudioEventSource::create(OSObject* target, IOService* controller, Handler handler) {
     if (!target || !controller || !handler)
         return nullptr;
-    auto* source = new AudioEventSource;
+    auto* source = new CirrusAudioEventSource;
     if (!source)
         return nullptr;
     if (!source->init(target) || !(source->mMailboxLock = IOLockAlloc())) {
@@ -171,7 +170,7 @@ AudioEventSource* AudioEventSource::create(OSObject* target, IOService* controll
     return source;
 }
 
-bool AudioEventSource::belongsToController(IORegistryEntry* entry) {
+bool CirrusAudioEventSource::belongsToController(IORegistryEntry* entry) {
     entry->retain();
     bool found = false;
     for (size_t depth = 0; entry && depth < 64; ++depth) {
@@ -188,7 +187,7 @@ bool AudioEventSource::belongsToController(IORegistryEntry* entry) {
     return found;
 }
 
-bool AudioEventSource::attach() {
+bool CirrusAudioEventSource::attach() {
     if (!hooksReady() || !listenersLock)
         return false;
     IOLockLock(listenersLock);
@@ -231,7 +230,7 @@ bool AudioEventSource::attach() {
     return true;
 }
 
-void AudioEventSource::detach() {
+void CirrusAudioEventSource::detach() {
     if (!listenersLock)
         return;
     IOLockLock(listenersLock);
@@ -245,7 +244,7 @@ void AudioEventSource::detach() {
     IOLockUnlock(mMailboxLock);
 }
 
-void AudioEventSource::observe(IOService* sender, bool route, uint32_t value, bool seed) {
+void CirrusAudioEventSource::observe(IOService* sender, bool route, uint32_t value, bool seed) {
     if (!belongsToController(sender))
         return;
     IORegistryEntry* engine = nullptr;
@@ -309,18 +308,18 @@ void AudioEventSource::observe(IOService* sender, bool route, uint32_t value, bo
         engine->release();
 }
 
-AudioEventState AudioEventSource::snapshot() {
+AudioEventState CirrusAudioEventSource::snapshot() {
     IOLockLock(mMailboxLock);
     auto state = mState;
     IOLockUnlock(mMailboxLock);
     return state;
 }
 
-bool AudioEventSource::unchanged(uint32_t generation) {
+bool CirrusAudioEventSource::unchanged(uint32_t generation) {
     return snapshot().generation == generation;
 }
 
-bool AudioEventSource::checkForWork() {
+bool CirrusAudioEventSource::checkForWork() {
     IOLockLock(mMailboxLock);
     bool pending = mPending && mAttached;
     auto state = mState;
@@ -331,7 +330,7 @@ bool AudioEventSource::checkForWork() {
     return false;
 }
 
-void AudioEventSource::free() {
+void CirrusAudioEventSource::free() {
     if (mAttached)
         detach();
     OSSafeReleaseNULL(mEngine);
@@ -339,5 +338,4 @@ void AudioEventSource::free() {
     if (mMailboxLock)
         IOLockFree(mMailboxLock);
     IOEventSource::free();
-}
 }

@@ -78,3 +78,18 @@ Ask what “without it” means: without this kext, without DSP, without a Windo
 Louder output does not establish better frequency response or correct protection. Firmware and channel coefficients can affect DSP behavior; Windows Lenovo/Nahimic processing is a separate part of the audio chain and is not reproduced merely by uploading amplifier firmware. This driver does not reproduce that user-space effects stack.
 
 Software EQ cannot substitute for verified boost settings, measured calibration or amplifier protection. `-cirrusnodsp` skips firmware and tuning and removes DSP acoustic protection. Do not use a long or high-volume bypass test to assess sound quality. Gain registers differ between the paths; their raw hexadecimal values are not comparable loudness measurements. Acoustic comparison requires matched output levels and suitable measurements, not just the same OS volume slider.
+
+## Playback preparation timing
+
+After each successful stereo commit, IORegistry publishes
+`Cirrus_Playback_PrepareMs_left` and `Cirrus_Playback_PrepareMs_right`. Query the
+service after each speaker start or headphone removal. Values include the
+endpoint's preparation and pair commit; they do not measure the entire audible
+jack-to-speaker delay. Keep volume/workload fixed and compare repeated cycles.
+Release without `-cirrusdbg` skips log-only I2C reads.
+
+`-cirrusirq` is an experimental reference-board protection delivery option. It
+requires the captured GPIO84/type3 provider. `Cirrus_Amp_IRQ_Mode` reports setup,
+fallback or latched-fault state. Polling health remains enabled. Registration is
+not proof that interrupts were delivered; do not manufacture a speaker short or
+overtemperature to test it. IRQ is disabled by default pending target validation.

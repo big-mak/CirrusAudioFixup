@@ -51,17 +51,18 @@ slider position; acoustic levels need to be matched first.
 
 | Area | Present behavior | Boundary or remaining work |
 | --- | --- | --- |
-| Output changes | IOAudioFamily selector and engine hooks wake the amplifier workloop | Actual hook loading is unverified; unknown routes or unavailable hooks use explicit polling fallback |
+| Output changes | IOAudioFamily selector and engine hooks wake the amplifier workloop | Both hooks and speaker/headphone switching verified on the current machine on 2026-10-10; unknown routes or unavailable hooks use explicit polling fallback |
 | Headphone idle | Recognized headphone/stopped-engine state leaves no periodic monitor timer after cleanup | Cleanup may need bounded retries; active speaker health still uses a timer |
 | Power transitions | Runtime start/stop advance through phases with monotonic acknowledgement deadlines | I2C, initialization and PM quiesce remain synchronous; no measured end-to-end latency bound |
 | Route cancellation during waits | New generations cancel preparation at each callback and before/after pair commit | Cancellation cannot interrupt a provider transfer already in progress |
 | Stereo | Both endpoints prepare muted; pair readiness gates commit, with whole-pair rollback | Register writes remain sequential; sample-synchronous unmute is not guaranteed |
 | DSP | Firmware parsing, upload/readback, mailbox and HALO checks | Firmware provenance and per-board acoustic behavior are not certified by these checks |
 | Protection | Required protection checks and latched faults stay active in Debug and Release | Hardware IRQ delivery and Linux automatic protection-release behavior are not fully reproduced |
+| Protection IRQ | Opt-in reference GPIO84 shared IRQ, GPIO2 open-drain, paired fault cleanup and polling fallback | macOS interrupt delivery and repeated suspend ordering remain unverified; default polling remains enabled |
 | Power management | Serialized sleep/wake cleanup and software reinitialization | Linux runtime autosuspend, hibernate and regcache restoration are not equivalent implementations here |
 | Hardware support | CS35L41 stereo profile with initialization and runtime model gates; playback sequences live in its backend | Firmware lifecycle remains service-owned; other amplifiers still require complete backends and validation |
 | Formats | 48 kHz stereo format gate | Broader sample rates and channel configurations are not supported |
-| Packaging | Pinned SDK/Lilu, Debug/Release policy, metadata and symbol checks in CI | Local Windows object compilation does not establish a linked/loadable bundle |
+| Packaging | Pinned SDK/Lilu, Debug/Release policy, metadata, symbol and vtable checks in Xcode/CI | Local macOS Debug/Release bundles build; fixed Debug loads and plays on the current machine. This does not establish the wider OS/board matrix |
 
 The reported first microphone-activation pop is not traced to a verified source.
 Changing output-amplifier gain or codec power verbs would not be an evidence-based

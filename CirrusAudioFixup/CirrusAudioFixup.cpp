@@ -295,6 +295,7 @@ bool CirrusAudioFixup::start(IOService* provider) {
         stop(provider);
         return false;
     }
+    setupAmplifierInterrupt();
     registerService();
     return true;
 }
@@ -442,6 +443,8 @@ void CirrusAudioFixup::initializeCS35L41(AmplifierState& amp) {
     } else {
         setDiagnosticStage(amp, STAGE_FIRMWARE_DISCOVERY);
         discoverFirmware(amp);
+        if (amp.firmwareIdentityPending)
+            return;
         if (!amp.wmfwData || amp.wmfwSize == 0 || !amp.binData || amp.binSize == 0) {
             recordDiagnosticFailure(amp, DIAG_FIRMWARE_MISSING, 0, 1, 0);
             abortInitialization();
@@ -554,6 +557,8 @@ void CirrusAudioFixup::handlePowerChange(bool powered) {
     if (mStopping || powered == mPowerAvailable)
         return;
     if (!powered) {
+        if (mAmpInterrupt)
+            mAmpInterrupt->disable();
         if (mProbeTimer)
             mProbeTimer->cancelTimeout();
 
@@ -567,6 +572,7 @@ void CirrusAudioFixup::handlePowerChange(bool powered) {
                     amp.playbackFaulted = true;
                 amp.initialized = false;
                 amp.firmwareValidated = false;
+                amp.firmwareIdentityDeadlineMs = 0;
                 amp.haloStateRegister = amp.haloHeartbeatRegister = 0;
             }
         }
@@ -587,6 +593,8 @@ void CirrusAudioFixup::handlePowerChange(bool powered) {
             fullDriverFlow();
             mNeedsReinitialization = false;
         }
+        if (mAmpInterrupt && configureAmplifierInterrupt())
+            mAmpInterrupt->enable();
         if (mProbeTimer)
             mProbeTimer->setTimeoutMS(50);
     }
@@ -597,6 +605,7 @@ void CirrusAudioFixup::handlePowerChange(bool powered) {
 // Cancel and remove event sources before releasing their owners; a timer
 // callback must never outlive the provider pointer it uses.
 void CirrusAudioFixup::stop(IOService* provider) {
+    teardownAmplifierInterrupt();
     teardownAudioEvents();
     if (mCommandGate) {
         mCommandGate->runAction(lifecycleAction, reinterpret_cast<void*>(uintptr_t(2)));
@@ -711,6 +720,102 @@ void CirrusAudioFixup::dumpProviderProperties(IOService* provider) {
     }
 
     iterator->release();
+}
+
+// The reference Linux capture uses a shared GPIO84, active-low open-drain
+// GPIO2 on both amps. Keep this additional delivery path opt-in until its
+// registration, interrupt delivery and suspend ordering are tested on macOS.
+bool CirrusAudioFixup::setupAmplifierInterrupt() {
+    setProperty("Cirrus_Amp_IRQ_Mode", "POLLING");
+    if (!bootArgEnabled("-cirrusirq") || bootArgEnabled("-cirrusro") ||
+        mDebugPhaseHalted || !mProvider || !mWorkLoop || !mPlatformProfile ||
+        strcmp(mPlatformProfile->name, "lenovo-clsa0100-cs35l41"))
+        return false;
+    auto* mode = OSDynamicCast(OSString, mProvider->getProperty("Interrupt Mode"));
+    auto* pin = OSDynamicCast(OSNumber, mProvider->getProperty("gpioPin"));
+    auto* irq = OSDynamicCast(OSNumber, mProvider->getProperty("gpioIRQ"));
+    if (!mode || strcmp(mode->getCStringNoCopy(), "GPIO") || !pin ||
+        pin->unsigned32BitValue() != 84 || !irq || irq->unsigned32BitValue() != 3)
+        return false;
+    mAmpInterrupt = IOInterruptEventSource::interruptEventSource(this,
+        amplifierInterruptReceived, mProvider, 0);
+    if (!mAmpInterrupt)
+        return false;
+    if (mWorkLoop->addEventSource(mAmpInterrupt) != kIOReturnSuccess) {
+        OSSafeReleaseNULL(mAmpInterrupt);
+        return false;
+    }
+    if (!configureAmplifierInterrupt()) {
+        teardownAmplifierInterrupt();
+        return false;
+    }
+    mAmpInterrupt->enable();
+    setProperty("Cirrus_Amp_IRQ_Mode", "GPIO84_PROTECTION_WITH_POLLING_BACKUP");
+    return true;
+}
+
+bool CirrusAudioFixup::configureAmplifierInterrupt() {
+    bool ok = true;
+    for (size_t i = 0; i < mAmpCount; ++i) {
+        auto& amp = mAmps[i];
+        if (!amp.present)
+            continue;
+        // Match the captured GPIO2 function without modifying GPIO1 supply
+        // control. Never clear a pending fault just to make IRQ setup pass.
+        ok = amp.initialized && !amp.playbackFaulted && checkProtectionStatus(amp) &&
+             updateRegisterBits(amp, 0x242C, 0x07000000, 0x02000000, TRACE_PLAYBACK) &&
+             updateRegisterBits(amp, 0x1100C, 0x80001000, 0x80000000, TRACE_PLAYBACK) &&
+             writeRegister(amp, 0x10110, 0x7FFD7E3F, TRACE_PLAYBACK) && ok;
+    }
+    if (!ok) {
+        // Restore polling even after a partially configured stereo pair.
+        for (size_t i = 0; i < mAmpCount; ++i)
+            if (mAmps[i].present)
+                writeRegister(mAmps[i], 0x10110, 0xFFFFFFFF, TRACE_PLAYBACK);
+        setProperty("Cirrus_Amp_IRQ_Mode", "POLLING_IRQ_SETUP_FAILED");
+    }
+    return ok;
+}
+
+void CirrusAudioFixup::amplifierInterruptReceived(OSObject* owner,
+                                                IOInterruptEventSource* source, int) {
+    auto* self = OSDynamicCast(CirrusAudioFixup, owner);
+    if (!self || self->mStopping || !self->mPowerAvailable)
+        return;
+    // A shared level interrupt must be serviced for both amps. On any fault
+    // or I/O failure leave delivery disabled and latch the existing cleanup
+    // policy. Do not acknowledge/release speaker protection automatically.
+    source->disable();
+    bool healthy = true;
+    for (size_t i = 0; i < self->mAmpCount; ++i) {
+        auto& amp = self->mAmps[i];
+        if (!amp.present)
+            continue;
+        if (!self->checkProtectionStatus(amp)) {
+            amp.playbackFaulted = true;
+            healthy = false;
+        }
+    }
+    if (!healthy) {
+        self->setProperty("Cirrus_Amp_IRQ_Mode", "FAULT_LATCHED_IRQ_DISABLED");
+        for (size_t i = 0; i < self->mAmpCount; ++i)
+            if (self->mAmps[i].present)
+                self->stopRuntimePlayback(self->mAmps[i]);
+        self->runBackgroundMonitor();
+        return;
+    }
+    // No enabled protection source was observed. Fall back instead of
+    // repeatedly re-enabling an unexplained asserted shared level line.
+    self->setProperty("Cirrus_Amp_IRQ_Mode", "POLLING_UNEXPLAINED_IRQ_DISABLED");
+}
+
+void CirrusAudioFixup::teardownAmplifierInterrupt() {
+    if (!mAmpInterrupt)
+        return;
+    mAmpInterrupt->disable();
+    if (mWorkLoop)
+        mWorkLoop->removeEventSource(mAmpInterrupt);
+    OSSafeReleaseNULL(mAmpInterrupt);
 }
 
 bool CirrusAudioFixup::setupProbeTimer() {
@@ -1716,8 +1821,46 @@ void CirrusAudioFixup::audioEventReceived(OSObject* owner, const cirrus::platfor
     self->runBackgroundMonitor();
 }
 
+// Retry only absent codec identity. Known unsupported IDs and transport,
+// protection or firmware validation faults keep their existing latch policy.
+bool CirrusAudioFixup::retryFirmwareIdentity() {
+    bool waiting = false;
+    bool changed = false;
+    for (size_t i = 0; i < mAmpCount; ++i) {
+        auto& amp = mAmps[i];
+        if (!amp.present || !amp.firmwareIdentityPending || amp.playbackFaulted)
+            continue;
+        discoverFirmware(amp);
+        if (amp.firmwareIdentityPending) {
+            if (playbackTimeMilliseconds() >= amp.firmwareIdentityDeadlineMs) {
+                amp.firmwareIdentityPending = false;
+                changed = true;
+                amp.playbackFaulted = true;
+                recordDiagnosticFailure(amp, DIAG_FIRMWARE_MISSING, 0, 1, 0);
+                char prop[80];
+                snprintf(prop, sizeof(prop), "Cirrus_Phase5A_Status_%s", amp.name);
+                setProperty(prop, "CODEC_IDENTITY_TIMEOUT");
+            } else {
+                waiting = true;
+            }
+        } else {
+            // Re-enter complete chip initialization only after an identity
+            // is available; no default SSID or unrelated tuning is invented.
+            initializeCS35L41(amp);
+            changed = true;
+        }
+    }
+    if (changed)
+        publishDriverVerdict();
+    if (waiting && mProbeTimer)
+        mProbeTimer->setTimeoutMS(100);
+    return waiting;
+}
+
 void CirrusAudioFixup::runBackgroundMonitor() {
     if (mStopping || !mPowerAvailable || mNeedsReinitialization || mDebugPhaseHalted)
+        return;
+    if (retryFirmwareIdentity())
         return;
     bool hdaStreamActive = synchronizeHdaStream();
     setupAudioEvents();
@@ -1802,107 +1945,118 @@ void CirrusAudioFixup::runBackgroundMonitor() {
             continue;
         }
 
-        uint32_t pwrCtrl1 = 0;
-        uint32_t pllLockSts = 0;
-        uint32_t mbox2 = 0;
-        uint32_t timestamp = 0;
-
-        if (!readRegister(amp, 0x00002014, &pwrCtrl1, TRACE_DUMP)) {
-            amp.playbackFaulted = true;
-            stopRuntimePlayback(amp);
-            continue;
-        }
-
-        bool pllReadable = readRegister(amp, 0x00010098, &pllLockSts, TRACE_DUMP);
-        if (!pllReadable) {
-            amp.playbackFaulted = true;
-            stopRuntimePlayback(amp);
-            continue;
-        }
-        bool globalEn = (pwrCtrl1 & 0x01) != 0;
-        bool pllLock = pllReadable && (pllLockSts & 0x00000002) != 0;
-
-        if (!readRegister(amp, 0x00013004, &mbox2, TRACE_DUMP)) {
-            amp.playbackFaulted = true;
-            stopRuntimePlayback(amp);
-            continue;
-        }
-
-        if (!amp.initialized) {
-            amp.playbackFaulted = true;
-            stopRuntimePlayback(amp);
-            continue;
-        }
-
-        if (!checkProtectionStatus(amp)) {
-            amp.playbackFaulted = true;
-            stopRuntimePlayback(amp);
-            continue;
-        }
-
-        if (!readRegister(amp, 0x025C0800, &timestamp, TRACE_DUMP)) {
-            amp.playbackFaulted = true;
-            stopRuntimePlayback(amp);
-            continue;
-        }
-
-        if (amp.playbackActive && hasAudio) {
-            const bool dspMode = amp.monitorCount >= 1;
-            uint32_t pwr2 = 0, core = 0, halo = 0;
-            bool powerReadable = readRegister(amp, cirrus::devices::cs35l41::registers::kPowerControl2, &pwr2, TRACE_PLAYBACK);
-            bool dspHealthy = bootArgEnabled("-cirrusnodsp");
-            if (dspMode) {
-                dspHealthy = amp.dspAlive && amp.firmwareValidated && amp.haloStateRegister &&
-                             readRegister(amp, cirrus::devices::cs35l41::registers::kRegDsp1CcmCoreControl, &core, TRACE_PLAYBACK) &&
-                             readRegister(amp, amp.haloStateRegister, &halo, TRACE_PLAYBACK) &&
-                             (core & (cirrus::devices::cs35l41::registers::kValHaloCoreEnable |
-                                      cirrus::devices::cs35l41::registers::kValHaloCoreReset)) ==
-                                 cirrus::devices::cs35l41::registers::kValHaloCoreEnable &&
-                             halo == 2 && mbox2 == cirrus::devices::cs35l41::registers::kStatusMailboxRunning;
+        // Preparation already checks status in its chip-specific phases and
+        // the stereo commit revalidates every safety invariant. Avoid the
+        // active-health/logging sweep on each 1 ms preparation callback.
+        if (amp.playbackTransition.pending()) {
+            if (!amp.initialized || !checkProtectionStatus(amp)) {
+                amp.playbackFaulted = true;
+                stopRuntimePlayback(amp);
+                continue;
             }
-            if (!globalEn || !pllLock || !powerReadable ||
-                (pwr2 & (0x3001 | cirrus::devices::cs35l41::registers::kMaskBoostEnable)) != (dspMode ? 0x3001U : 1U) || !dspHealthy) {
-                CIRRUS_ERR("ACTIVE_STATE_LOST amp=%s pwr1=0x%08X pwr2=0x%08X pll=%d mbox=%u core=0x%08X halo=%u", amp.name, pwrCtrl1, pwr2,
-                           pllLock, mbox2, core, halo);
-                if (!pllLock) {
-                    recordDiagnosticFailure(amp, DIAG_PLL_UNLOCKED, cirrus::devices::cs35l41::registers::kRegIrq1RawStatus3, 2, pllLockSts);
-                    amp.pllRetryCooldown = 4;
-                    amp.pllRecoveryPending = globalEn && powerReadable && dspHealthy &&
-                        (pwr2 & (0x3001 | cirrus::devices::cs35l41::registers::kMaskBoostEnable)) ==
-                            (dspMode ? 0x3001U : 1U);
-                } else {
-                    recordDiagnosticFailure(amp, DIAG_PLAYBACK_INVARIANT, cirrus::devices::cs35l41::registers::kPowerControl2,
-                                            dspMode ? 0x3001U : 1U, pwr2);
+        } else {
+            uint32_t pwrCtrl1 = 0;
+            uint32_t pllLockSts = 0;
+            uint32_t mbox2 = 0;
+            uint32_t timestamp = 0;
+
+            if (!readRegister(amp, 0x00002014, &pwrCtrl1, TRACE_DUMP)) {
+                amp.playbackFaulted = true;
+                stopRuntimePlayback(amp);
+                continue;
+            }
+
+            bool pllReadable = readRegister(amp, 0x00010098, &pllLockSts, TRACE_DUMP);
+            if (!pllReadable) {
+                amp.playbackFaulted = true;
+                stopRuntimePlayback(amp);
+                continue;
+            }
+            bool globalEn = (pwrCtrl1 & 0x01) != 0;
+            bool pllLock = pllReadable && (pllLockSts & 0x00000002) != 0;
+
+            if (!readRegister(amp, 0x00013004, &mbox2, TRACE_DUMP)) {
+                amp.playbackFaulted = true;
+                stopRuntimePlayback(amp);
+                continue;
+            }
+
+            if (!amp.initialized) {
+                amp.playbackFaulted = true;
+                stopRuntimePlayback(amp);
+                continue;
+            }
+
+            if (!checkProtectionStatus(amp)) {
+                amp.playbackFaulted = true;
+                stopRuntimePlayback(amp);
+                continue;
+            }
+
+            if (gCirrusDebug && !readRegister(amp, 0x025C0800, &timestamp, TRACE_DUMP)) {
+                amp.playbackFaulted = true;
+                stopRuntimePlayback(amp);
+                continue;
+            }
+
+            if (amp.playbackActive && hasAudio) {
+                const bool dspMode = amp.monitorCount >= 1;
+                uint32_t pwr2 = 0, core = 0, halo = 0;
+                bool powerReadable = readRegister(amp, cirrus::devices::cs35l41::registers::kPowerControl2, &pwr2, TRACE_PLAYBACK);
+                bool dspHealthy = bootArgEnabled("-cirrusnodsp");
+                if (dspMode) {
+                    dspHealthy = amp.dspAlive && amp.firmwareValidated && amp.haloStateRegister &&
+                                 readRegister(amp, cirrus::devices::cs35l41::registers::kRegDsp1CcmCoreControl, &core, TRACE_PLAYBACK) &&
+                                 readRegister(amp, amp.haloStateRegister, &halo, TRACE_PLAYBACK) &&
+                                 (core & (cirrus::devices::cs35l41::registers::kValHaloCoreEnable |
+                                          cirrus::devices::cs35l41::registers::kValHaloCoreReset)) ==
+                                     cirrus::devices::cs35l41::registers::kValHaloCoreEnable &&
+                                 halo == 2 && mbox2 == cirrus::devices::cs35l41::registers::kStatusMailboxRunning;
                 }
-                amp.playbackFaulted = true;
-                stopRuntimePlayback(amp);
-                continue;
+                if (!globalEn || !pllLock || !powerReadable ||
+                    (pwr2 & (0x3001 | cirrus::devices::cs35l41::registers::kMaskBoostEnable)) != (dspMode ? 0x3001U : 1U) || !dspHealthy) {
+                    CIRRUS_ERR("ACTIVE_STATE_LOST amp=%s pwr1=0x%08X pwr2=0x%08X pll=%d mbox=%u core=0x%08X halo=%u", amp.name, pwrCtrl1, pwr2,
+                               pllLock, mbox2, core, halo);
+                    if (!pllLock) {
+                        recordDiagnosticFailure(amp, DIAG_PLL_UNLOCKED, cirrus::devices::cs35l41::registers::kRegIrq1RawStatus3, 2, pllLockSts);
+                        amp.pllRetryCooldown = 4;
+                        amp.pllRecoveryPending = globalEn && powerReadable && dspHealthy &&
+                            (pwr2 & (0x3001 | cirrus::devices::cs35l41::registers::kMaskBoostEnable)) ==
+                                (dspMode ? 0x3001U : 1U);
+                    } else {
+                        recordDiagnosticFailure(amp, DIAG_PLAYBACK_INVARIANT, cirrus::devices::cs35l41::registers::kPowerControl2,
+                                                dspMode ? 0x3001U : 1U, pwr2);
+                    }
+                    amp.playbackFaulted = true;
+                    stopRuntimePlayback(amp);
+                    continue;
+                }
             }
-        }
 
-        bool playbackTransition = hasAudio != amp.playbackActive;
-        bool heartbeat = (++amp.monitorLogCountdown >= (hasAudio ? 50U : 40U));
-        if (playbackTransition || heartbeat) {
-            uint32_t aspEnables = 0, spRate = 0, spFmt = 0, dacSrc = 0, ampVol = 0;
-            bool snapshotReadable =
-                readRegister(amp, 0x00004800, &aspEnables, TRACE_DUMP) && readRegister(amp, 0x00004804, &spRate, TRACE_DUMP) &&
-                readRegister(amp, 0x00004808, &spFmt, TRACE_DUMP) && readRegister(amp, 0x00004C00, &dacSrc, TRACE_DUMP) &&
-                readRegister(amp, 0x00006000, &ampVol, TRACE_DUMP);
-            if (!snapshotReadable) {
-                amp.playbackFaulted = true;
-                stopRuntimePlayback(amp);
-                continue;
+            bool playbackTransition = hasAudio != amp.playbackActive;
+            bool heartbeat = (++amp.monitorLogCountdown >= (hasAudio ? 50U : 40U));
+            if (gCirrusDebug && (playbackTransition || heartbeat)) {
+                uint32_t aspEnables = 0, spRate = 0, spFmt = 0, dacSrc = 0, ampVol = 0;
+                bool snapshotReadable =
+                    readRegister(amp, 0x00004800, &aspEnables, TRACE_DUMP) && readRegister(amp, 0x00004804, &spRate, TRACE_DUMP) &&
+                    readRegister(amp, 0x00004808, &spFmt, TRACE_DUMP) && readRegister(amp, 0x00004C00, &dacSrc, TRACE_DUMP) &&
+                    readRegister(amp, 0x00006000, &ampVol, TRACE_DUMP);
+                if (!snapshotReadable) {
+                    amp.playbackFaulted = true;
+                    stopRuntimePlayback(amp);
+                    continue;
+                }
+
+                CIRRUS_LOG("background monitor %s: global_en=%d pll_lock=%d mbox2=0x%08X ts=0x%08X->0x%08X audio=%d active=%d "
+                           "hda_sd=%u tag=%u fmt=0x%04X sp_en=0x%08X sp_rate=0x%08X sp_fmt=0x%08X dac_src=0x%08X vol=0x%08X mode=%s",
+                           amp.name, globalEn, pllLock, mbox2, amp.lastTimestamp, timestamp, hasAudio, amp.playbackActive,
+                           mHdaState.lastDescriptor, mHdaState.lastStreamTag, mHdaState.lastFormat, aspEnables, spRate, spFmt, dacSrc, ampVol,
+                           (amp.monitorCount >= 1) ? "DSP" : "BYPASS");
+                amp.monitorLogCountdown = 0;
             }
 
-            CIRRUS_LOG("background monitor %s: global_en=%d pll_lock=%d mbox2=0x%08X ts=0x%08X->0x%08X audio=%d active=%d "
-                       "hda_sd=%u tag=%u fmt=0x%04X sp_en=0x%08X sp_rate=0x%08X sp_fmt=0x%08X dac_src=0x%08X vol=0x%08X mode=%s",
-                       amp.name, globalEn, pllLock, mbox2, amp.lastTimestamp, timestamp, hasAudio, amp.playbackActive,
-                       mHdaState.lastDescriptor, mHdaState.lastStreamTag, mHdaState.lastFormat, aspEnables, spRate, spFmt, dacSrc, ampVol,
-                       (amp.monitorCount >= 1) ? "DSP" : "BYPASS");
-            amp.monitorLogCountdown = 0;
+            amp.lastTimestamp = timestamp;
         }
-
-        amp.lastTimestamp = timestamp;
 
         if (hasAudio && !amp.playbackActive) {
             using namespace cirrus::devices::cs35l41;
@@ -2018,6 +2172,9 @@ void CirrusAudioFixup::runBackgroundMonitor() {
                 amp.pllRecoveryPending = false;
                 markDiagnosticSuccess(amp, STAGE_PLAYBACK_ACTIVE);
                 char property[80];
+                const uint64_t committedMs = playbackTimeMilliseconds();
+                snprintf(property, sizeof(property), "Cirrus_Playback_PrepareMs_%s", amp.name);
+                setProperty(property, committedMs - amp.playbackTransition.prepareStartedMs, 64);
                 snprintf(property, sizeof(property), "Cirrus_Playback_Verdict_%s", amp.name);
                 OSString* verdict = OSString::withCString("ACTIVE_REGISTERS_VERIFIED_ROUTE_UNCONFIRMED");
                 if (verdict) {
@@ -2480,6 +2637,7 @@ void CirrusAudioFixup::publishDriverVerdict() {
     bool allInitialized = (mAmpCount > 0);
     bool allDsp = (mAmpCount > 0);
     bool anyFaulted = false;
+    bool identityPending = false;
     for (size_t i = 0; i < mAmpCount; ++i) {
         if (!mAmps[i].present)
             continue;
@@ -2487,12 +2645,14 @@ void CirrusAudioFixup::publishDriverVerdict() {
             allInitialized = false;
         if (!mAmps[i].dspAlive || !mAmps[i].firmwareValidated)
             allDsp = false;
+        identityPending |= mAmps[i].firmwareIdentityPending;
         if (mAmps[i].playbackFaulted)
             anyFaulted = true;
     }
     const char* verdict = !mPowerAvailable                 ? "SUSPENDED"
                           : bootArgEnabled("-cirrusro")    ? "READ_ONLY"
                           : anyFaulted                     ? "FAULT_LATCHED"
+                          : identityPending                ? "WAITING_FOR_CODEC_IDENTITY"
                           : mDebugPhaseHalted               ? "DEBUG_PHASE_HALTED"
                           : !allInitialized                ? "FAILED_INIT"
                           : allDsp                         ? "READY_DSP"
@@ -3598,8 +3758,8 @@ void CirrusAudioFixup::discoverFirmware(AmplifierState& amp) {
     }
 
     uint32_t codecSSID = 0;
-    const char* codecClasses[] = {"IOHDACodecDevice", "AppleHDACodecGeneric", "AppleHDACodec"};
-    for (size_t c = 0; c < 3 && codecSSID == 0; c++) {
+    const char* codecClasses[] = {"IOHDACodecFunction", "IOHDACodecDevice", "AppleHDACodecGeneric", "AppleHDACodec"};
+    for (size_t c = 0; c < 4 && codecSSID == 0; c++) {
         OSDictionary* match = serviceMatching(codecClasses[c]);
         if (!match)
             continue;
@@ -3609,19 +3769,38 @@ void CirrusAudioFixup::discoverFirmware(AmplifierState& amp) {
             continue;
         IORegistryEntry* entry;
         while ((entry = OSDynamicCast(IORegistryEntry, iter->getNextObject()))) {
+            // Reject a known HDMI/GPU codec: its SSID is not speaker identity.
+            uint32_t codecVendor = 0;
+            IORegistryEntry* ancestor = entry;
+            for (size_t depth = 0; ancestor && depth < 3 && !codecVendor; ++depth) {
+                auto* vendor = OSDynamicCast(OSNumber, ancestor->getProperty("IOHDACodecVendorID"));
+                if (!vendor)
+                    vendor = OSDynamicCast(OSNumber, ancestor->getProperty("vendorcodecID"));
+                if (vendor)
+                    codecVendor = vendor->unsigned32BitValue();
+                ancestor = ancestor->getParentEntry(gIOServicePlane);
+            }
+            if (codecVendor && (codecVendor >> 16) != 0x10EC)
+                continue;
             OSData* subData = OSDynamicCast(OSData, entry->getProperty("subsystem-id"));
             if (!subData)
                 subData = OSDynamicCast(OSData, entry->getProperty("SubsystemID"));
+            if (!subData)
+                subData = OSDynamicCast(OSData, entry->getProperty("IOHDACodecFunctionSubsystemID"));
             if (subData && subData->getLength() >= 4) {
                 codecSSID = *(const uint32_t*)subData->getBytesNoCopy();
-                break;
+                if (codecSSID)
+                    break;
             }
             OSNumber* subNum = OSDynamicCast(OSNumber, entry->getProperty("subsystem-id"));
             if (!subNum)
                 subNum = OSDynamicCast(OSNumber, entry->getProperty("SubsystemID"));
+            if (!subNum)
+                subNum = OSDynamicCast(OSNumber, entry->getProperty("IOHDACodecFunctionSubsystemID"));
             if (subNum) {
                 codecSSID = subNum->unsigned32BitValue();
-                break;
+                if (codecSSID)
+                    break;
             }
         }
         iter->release();
@@ -3672,6 +3851,18 @@ void CirrusAudioFixup::discoverFirmware(AmplifierState& amp) {
     char propSSID[64];
     snprintf(propSSID, sizeof(propSSID), "Cirrus_SSID_%s", amp.name);
     setProperty(propSSID, (uint64_t)ssid, 32);
+
+    // The codec may publish after the I2C provider. Zero means unavailable,
+    // not an unsupported board, and must not permanently latch a boot fault.
+    if (!ssid) {
+        amp.firmwareIdentityPending = true;
+        if (!amp.firmwareIdentityDeadlineMs)
+            amp.firmwareIdentityDeadlineMs = playbackTimeMilliseconds() + 30000;
+        setProperty(propStatus, "WAITING_FOR_CODEC_IDENTITY");
+        return;
+    }
+    amp.firmwareIdentityPending = false;
+    amp.firmwareIdentityDeadlineMs = 0;
 
     const FirmwareResource* foundRes = nullptr;
     for (size_t i = 0; i < cs35l41FirmwareCount; i++) {

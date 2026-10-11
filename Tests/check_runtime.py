@@ -13,7 +13,7 @@ def function(name):
     return SOURCE[start:end]
 
 names = ['checkProtectionStatus', 'stopPlayback', 'runBackgroundMonitor', 'sendMailboxCommand', 'unlockTestKey', 'lockTestKey', 'stopDSP', 'bringupDSP', 'verifyDSPAlive', 'handlePowerChange', 'supportedHdaFormat', 'transferToAddress', 'publishDriverVerdict', 'applyPLL', 'applyASP', 'applyRegisterSequence', 'powerUpAmplifier', 'verifyIdleConfiguration']
-names.extend(['snapshotDiagnostics', 'stopRuntimePlayback'])
+names.extend(['snapshotDiagnostics', 'stopRuntimePlayback', 'configureAmplifierInterrupt', 'amplifierInterruptReceived', 'retryFirmwareIdentity'])
 functions = '\n'.join(function(name) for name in names).replace('CirrusAudioFixup::runBackgroundMonitor()', 'CirrusAudioFixup::runMonitorStep()')
 
 amp = HEADER[HEADER.index('struct AmplifierState {'):HEADER.index('struct FirmwareImage;')]
@@ -208,8 +208,16 @@ struct HDAStreamState {
 };
 }}}
 
+struct OSObject {};
+struct IOInterruptEventSource {
+    bool enabled=true;
+    void disable() { enabled=false; }
+    void enable() { enabled=true; }
+};
+#define OSDynamicCast(type, object) reinterpret_cast<type*>(object)
 class CirrusAudioFixup {
 public:
+    IOInterruptEventSource* mAmpInterrupt=nullptr;
     size_t mAmpCount{2};
     CS35L41Amp mAmps[2]{};
     Timer* mProbeTimer=nullptr;
@@ -261,6 +269,8 @@ public:
     std::map<uint32_t,uint32_t> regs;
     std::map<std::string,std::string> properties;
     std::vector<std::pair<uint32_t,uint32_t>> writes;
+    std::vector<uint32_t> reads;
+    std::map<std::string,uint64_t> numericProperties;
     CirrusAudioFixup() {
         mHdaConverterPrepared=true; mHdaTopologyLogged=true;
         mHdaControllerObserved=true; mHdaStreamActive=true;
@@ -279,6 +289,7 @@ public:
     bool step() { ++ops; if(ops==failAt || (failAllFrom && ops>=failAllFrom)) { failed=true; return false; } return true; }
     bool readRegister(CS35L41Amp& a,uint32_t r,uint32_t* v,TraceSource=TRACE_OTHER) {
         auto& regs = isolateEndpoints ? endpointRegs[a.address] : this->regs;
+        reads.push_back(r);
         if(!step()) return false;
         if(r==0x13004) hostNowNs+=mailboxReadDelayNs;
         if(r==0x10010) ++irqReads;
@@ -344,8 +355,9 @@ public:
         a.diagnostic.latestFailure=f;
     }
     void markDiagnosticSuccess(CS35L41Amp&,DriverStage) {}
+    void setProperty(const char* p,const char* v) { properties[p]=v; }
     void setProperty(const char* p,OSString* v) { properties[p]=v->value; }
-    void setProperty(const char*,uint64_t,unsigned) {}
+    void setProperty(const char* p,uint64_t v,unsigned) { numericProperties[p]=v; }
     void setProperty(const char*,bool) {}
     bool initCodec(CS35L41Amp&) { return false; }
     bool initializeHardwareErrata(CS35L41Amp&) { return false; }
@@ -353,7 +365,12 @@ public:
     void logPowerSnapshot(CS35L41Amp&) {}
     bool applyGPIO(CS35L41Amp&) { return false; }
     bool configureHardware(CS35L41Amp&) { return false; }
-    void discoverFirmware(CS35L41Amp&) {}
+    bool identityAvailable=false;
+    unsigned identityInitializations=0;
+    void discoverFirmware(CS35L41Amp& a) {
+        a.firmwareIdentityPending=!identityAvailable;
+    }
+    void initializeCS35L41(CS35L41Amp& a) { ++identityInitializations; a.initialized=true; }
     void fullDriverFlow() {
         assert(mPowerAvailable && mNeedsReinitialization);
         ++restores;
@@ -377,6 +394,8 @@ public:
 '''
 
 declarations = '\n'.join(function(name).split('{', 1)[0].replace('CirrusAudioFixup::', '') + ';' for name in names).replace('runBackgroundMonitor()', 'runMonitorStep()')
+
+declarations = declarations.replace('void amplifierInterruptReceived(', 'static void amplifierInterruptReceived(')
 
 adapter = r'''
 class FixupRegisterIOAdapter : public cirrus::core::RegisterIO {
@@ -510,12 +529,61 @@ int main() {
         unsupported.mAmps[0].model=cirrus::core::CodecModel::CS35L56;
         unsupported.runMonitorStep();
         assert(unsupported.ops==0 && unsupported.unmute==0 && unsupported.mAmps[0].playbackFaulted);
+        // Linux-style final observations: time elapsed does not erase an
+        // acknowledgement, but an unsatisfied condition still times out.
+        for (auto phase : {PlaybackPhase::Resume, PlaybackPhase::Output, PlaybackPhase::Pup, PlaybackPhase::Pll}) {
+            for (bool ready : {false,true}) {
+                CirrusAudioFixup polled;
+                polled.regs[0x2014]=1;
+                polled.regs[0x2018]=0x3001;
+                polled.regs[0x4C00]=0x32;
+                polled.regs[0x4800]=0x10001;
+                polled.regs[0x13004]=ready?0:1;
+                polled.regs[0x10010]=ready?0x01000000:0;
+                polled.pll=ready;
+                FixupRegisterIOAdapter io(&polled,polled.mAmps[0]);
+                PlaybackTransition transition;
+                transition.phase=phase;
+                transition.deadlineMs=1;
+                auto result=Playback::advance(io,transition,200,true,0x1500);
+                assert((result==PlaybackProgress::Failed)==!ready);
+            }
+        }
+        for (auto phase : {ShutdownPhase::Pdn, ShutdownPhase::Output, ShutdownPhase::Pause}) {
+            for (bool ready : {false,true}) {
+                CirrusAudioFixup polled;
+                polled.regs[0x10010]=ready?0x00800000:0;
+                unsigned expected=phase==ShutdownPhase::Pause?1:0;
+                polled.regs[0x13004]=ready?expected:2;
+                FixupRegisterIOAdapter io(&polled,polled.mAmps[0]);
+                ShutdownTransition transition;
+                transition.phase=phase;
+                transition.deadlineMs=1;
+                Playback::shutdown(io,transition,200,true,0x1500);
+                assert(transition.ok==ready);
+                assert(!transition.pending() || transition.phase!=phase);
+            }
+        }
         CirrusAudioFixup slowBus;
         slowBus.runMonitorStep();
         slowBus.mailboxReadDelayNs=6000000;
-        slowBus.runBackgroundMonitor();
-        assert(slowBus.unmute==0 && slowBus.mAmps[0].playbackFaulted);
-        assert(slowBus.mAmps[0].diagnostic.firstFailure==DIAG_DSP_MAILBOX);
+        slowBus.runMonitorStep();
+        assert(slowBus.unmute==0 && !slowBus.mAmps[0].playbackFaulted);
+        assert(slowBus.mAmps[0].playbackTransition.phase==PlaybackPhase::Power);
+        // A late callback must accept an already completed DSP command.
+        CirrusAudioFixup lateMailbox;
+        lateMailbox.runMonitorStep();
+        hostNowNs+=30000000;
+        lateMailbox.runMonitorStep();
+        assert(!lateMailbox.mAmps[0].playbackFaulted);
+        assert(lateMailbox.mAmps[0].playbackTransition.phase==PlaybackPhase::Power);
+        CirrusAudioFixup expiredMailbox;
+        expiredMailbox.mailbox=false;
+        expiredMailbox.runMonitorStep();
+        hostNowNs+=30000000;
+        expiredMailbox.runMonitorStep();
+        assert(expiredMailbox.unmute==0 && expiredMailbox.mAmps[0].playbackFaulted);
+        assert(expiredMailbox.mAmps[0].diagnostic.firstFailure==DIAG_DSP_MAILBOX);
         for(unsigned version : {0x1500U, 0x1D00U}) {
         CirrusAudioFixup cleanupBaseline;
         cleanupBaseline.mAmps[0].firmwareIdVersion=version;
@@ -852,6 +920,67 @@ int main() {
     eventDriver.snapshotDiagnostics(eventDriver.mAmps[0], "REQUESTED DEBUG");
     checkNew(eventDriver.ops > silentSnapshotOps, "requested snapshots retain diagnostic I2C reads");
     gCirrusDebug=false;
+    CirrusAudioFixup quietHealth;
+    quietHealth.runBackgroundMonitor();
+    quietHealth.ops=0;
+    quietHealth.reads.clear();
+    quietHealth.runBackgroundMonitor();
+    const unsigned quietHealthOps=quietHealth.ops;
+    checkNew(std::find(quietHealth.reads.begin(),quietHealth.reads.end(),0x025C0800)==quietHealth.reads.end(),
+             "quiet health skips log-only timestamp read");
+    checkNew(std::find(quietHealth.reads.begin(),quietHealth.reads.end(),0x10010)!=quietHealth.reads.end(),
+             "quiet health retains protection status observation");
+    checkNew(quietHealth.numericProperties.count("Cirrus_Playback_PrepareMs_host")==1,
+             "successful commit publishes prepare duration");
+    gCirrusDebug=true;
+    quietHealth.ops=0;
+    quietHealth.runBackgroundMonitor();
+    checkNew(quietHealth.ops>quietHealthOps,"debug health retains extra diagnostic transfers");
+    gCirrusDebug=false;
+    CirrusAudioFixup delayedIdentity;
+    Timer identityTimer;
+    delayedIdentity.mProbeTimer=&identityTimer;
+    auto& delayedAmp=delayedIdentity.mAmps[0];
+    delayedAmp.initialized=false;
+    delayedAmp.firmwareIdentityPending=true;
+    delayedAmp.firmwareIdentityDeadlineMs=playbackTimeMilliseconds()+30000;
+    delayedIdentity.runMonitorStep();
+    checkNew(!delayedAmp.playbackFaulted && delayedIdentity.ops==0 && identityTimer.lastDelay==100,
+             "absent codec identity waits without amp writes or permanent fault");
+    delayedIdentity.identityAvailable=true;
+    delayedIdentity.retryFirmwareIdentity();
+    checkNew(delayedIdentity.identityInitializations==1 && !delayedAmp.firmwareIdentityPending,
+             "late codec identity resumes complete initialization once");
+    delayedIdentity.retryFirmwareIdentity();
+    checkNew(delayedIdentity.identityInitializations==1,"ready identity does not repeat initialization");
+    CirrusAudioFixup missingIdentity;
+    auto& missingAmp=missingIdentity.mAmps[0];
+    missingAmp.firmwareIdentityPending=true;
+    missingAmp.firmwareIdentityDeadlineMs=playbackTimeMilliseconds();
+    missingIdentity.retryFirmwareIdentity();
+    checkNew(missingAmp.playbackFaulted && !missingAmp.firmwareIdentityPending &&
+             missingIdentity.properties["Cirrus_Phase5A_Status_host"]=="CODEC_IDENTITY_TIMEOUT",
+             "identity wait expires with explicit failure instead of retrying forever");
+    CirrusAudioFixup irqDriver;
+    IOInterruptEventSource irqSource;
+    irqDriver.mAmpInterrupt=&irqSource;
+    checkNew(irqDriver.configureAmplifierInterrupt(),"healthy reference amps configure protection IRQ");
+    checkNew(irqDriver.regs[0x10110]==0x7FFD7E3F && irqDriver.regs[0x242C]==0x02000000,
+             "IRQ setup matches Linux mask and GPIO2 open drain");
+    checkNew(irqDriver.regs[0x11008]==0,"IRQ setup leaves GPIO1 supply untouched");
+    irqDriver.regs[0x10010]=0x80;
+    CirrusAudioFixup::amplifierInterruptReceived(reinterpret_cast<OSObject*>(&irqDriver),&irqSource,1);
+    checkNew(!irqSource.enabled && irqDriver.mAmps[0].playbackFaulted,
+             "protection IRQ latches fault and disables level delivery");
+    CirrusAudioFixup irqSetupFault;
+    irqSetupFault.failAt=2;
+    checkNew(!irqSetupFault.configureAmplifierInterrupt() && irqSetupFault.regs[0x10110]==0xFFFFFFFF,
+             "partial IRQ setup restores polling masks");
+    CirrusAudioFixup spuriousIrq;
+    irqSource.enabled=true;
+    CirrusAudioFixup::amplifierInterruptReceived(reinterpret_cast<OSObject*>(&spuriousIrq),&irqSource,1);
+    checkNew(!irqSource.enabled && !spuriousIrq.mAmps[0].playbackFaulted,
+             "unexplained shared level IRQ falls back without an interrupt storm");
     CirrusAudioFixup gatedPll;
     gatedPll.mAudioState = {true, true, true, true, 1};
     gatedPll.pll=false;

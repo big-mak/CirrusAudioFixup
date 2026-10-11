@@ -1,8 +1,6 @@
 //
 // UploadPlan.hpp
-// Namespaced upload-plan data declarations.
-// The production uploader currently declares its own plan types. This header
-// is not the active upload path; keep that distinction when consolidating them.
+// Shared upload-plan types used by the production firmware uploader.
 // See LICENSE for distribution terms.
 //
 

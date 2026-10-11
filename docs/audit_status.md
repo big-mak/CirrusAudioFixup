@@ -5,6 +5,31 @@ resulting bundles before publishing the version.
 
 ## Findings addressed in code
 
+### Target-machine evidence collected on 2026-10-10
+
+Local Xcode Debug and Release bundles now build and pass the host regressions,
+metadata, architecture, dSYM UUID and OpenCore vtable checks. Direct Xcode
+builds also reject the original namespaced IOKit vtable regression. The earlier
+object-only validation statements below describe historical passes, not the
+current local build status.
+
+After the vtable and acknowledgement-poll fixes, the supplied 19:21 kernel log
+and 19:22 IORegistry snapshot show both amplifiers in `READY_DSP`, protection
+`OK`, active playback and `IOAUDIO_FAMILY_EVENTS`. Both IOAudioFamily hooks
+report installed. No `CirrusAudioFixup: ERROR:` message appears among the 2,652
+Cirrus messages in the supplied kernel log. The user confirms audible internal
+speakers and working headphone insertion/removal with rapid speaker recovery.
+This establishes those flows on this machine; it does not certify other boards
+or OS versions. `log-other.txt` contains no Cirrus messages and is not independent
+driver-health evidence.
+
+Four completed preparation cycles span approximately 75.3, 77.1, 87.2 and
+93.5 ms from left-channel `PLAYBACK_PREPARE` to pair `PLAYBACK_ACTIVE`. These
+are driver preparation intervals in a verbose Debug capture, not jack-to-sound
+latency or worst-case bounds. No sleep/wake test or acoustic measurement is
+established by these captures. The remaining matrix and parity work below stays
+open. P1/P2 labels denote finding priority, not completed hardware milestones.
+
 | Finding | Priority | Current change |
 | --- | --- | --- |
 | Read-only startup could toggle GPIO reset | P1 | Read-only and probe-only modes return before reset-controller discovery or writes |
@@ -26,6 +51,38 @@ complete production source into x86_64 Mach-O objects targeting macOS 11 for
 Debug and Release. git diff --check reported no whitespace errors. These objects
 are not linked kext bundles; Xcode, dSYM generation and runtime checks remain
 unverified for the current changes.
+
+## P2 latency and P3 follow-up
+
+Preparation avoids redundant active-health and log-only I2C reads while keeping
+phase protection and pair-commit verification. Quiet health skips timestamp and
+ASP logging reads. Per-endpoint prepare durations are published in IORegistry;
+a faster end-to-end transition is not claimed until the new bundle is booted.
+
+`WMFWFormat.hpp` and `UploadPlan.hpp` are now the canonical production types.
+Parser and uploader consume them instead of defining incompatible duplicates.
+This closes the duplicate-type cleanup; further service/backend extraction is
+still open. IRQ provider forwarding has been reviewed against the supplied custom
+VoodooI2C source. An opt-in shared GPIO84 protection path is implemented with fault latching,
+polling fallback and PM disable/reconfigure. Target IRQ delivery and runtime
+hibernate are still open, as is validation on other OS/board combinations. P3 is not complete.
+
+### Current deployment and validation matrix
+
+| Target | Evidence | Pending |
+| --- | --- | --- |
+| Reference Lenovo, macOS 15.5 (24F74), prior fixed Debug | User-confirmed speakers/headphone switching; supplied clean driver log | Repeated sleep/wake and cold boot |
+| Same target, optimized Release | All host suites, Xcode bundle/dSYM/metadata/vtable checks; installed EFI SHA-256 `6104aead881f1395d00e372fc3bb0b5780a295ed001252077e9faa6e97a06865` | Next boot, audible output and repeated timing samples |
+| Reference Linux capture | Two amps on shared GPIO84; register/IRQ configuration captured | IRQ count was zero; no observed protection delivery |
+| Other boards/OS versions | No new target evidence | Full validation |
+
+Deployment removes only `-cirrusdbg` and `-cirrusdumptrace` from the EFI config.
+macOS denied a direct NVRAM write; the existing OpenCore NVRAM/Delete entry for
+`boot-args` will permit its quiet Add value on next boot. Existing non-Cirrus
+config arguments are preserved. IRQ is not enabled for this deployment.
+The prior kext, config and boot arguments are saved under
+`build/LoadDebug/before-p2-release`. The running kernel still uses the old bundle
+until reboot; deployment is not new-bundle hardware verification.
 
 ## Standardization
 
@@ -121,3 +178,22 @@ instruction addresses and limits of the disassembly findings.
 
 Do not use READY_DSP or an HDA RUN bit as proof of audible output or measured
 speaker calibration. Preserve both the original failure and later cleanup results.
+
+## Boot identity failure found on 2026-10-11
+
+The supplied failing boot log shows Release attached at 4.388 s, both CS35L41
+endpoints detected, then firmware discovery failed at 4.487/4.580 s with SSID
+zero. The live registry has `IOHDACodecFunctionSubsystemID = 0x17AA3847` under
+`IOHDACodecFunction`. This is not an amplifier detect failure. Discovery omitted
+that class/property and permanently latched missing firmware when identity was
+not yet published. Debug logging delays could change boot timing but are not a
+correct synchronization mechanism.
+
+Discovery now reads number/data FunctionSubsystemID and skips known non-Realtek
+codec identities and zero entries. An absent SSID defers firmware upload and
+keeps output disabled, retrying from the timer every 100 ms for at most 30 s.
+When identity arrives, complete chip initialization resumes. A known unsupported
+SSID, protection/transport failure or identity timeout remains a fault. No
+reference SSID is automatically substituted. Host regressions cover actual
+registry lookup, deferred stereo bringup, late identity, no repeated init and
+bounded timeout. The new installed bundle still requires a target reboot test.

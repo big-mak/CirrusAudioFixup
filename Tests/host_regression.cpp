@@ -1,3 +1,5 @@
+#include "Firmware/WMFW/WMFWFormat.hpp"
+#include "Firmware/WMFW/UploadPlan.hpp"
 #include "uploader.hpp"
 #include "arrays.hpp"
 #include "resources.hpp"

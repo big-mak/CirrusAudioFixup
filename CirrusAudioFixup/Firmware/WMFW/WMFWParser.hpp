@@ -9,6 +9,7 @@
 #pragma once
 
 #include <IOKit/IOLib.h>
+#include "Firmware/WMFW/WMFWFormat.hpp"
 
 #define WMFW_MAGIC_0 'W'
 #define WMFW_MAGIC_1 'M'
@@ -27,62 +28,8 @@
 #define WMFW_ADSP2_XM 0x05
 #define WMFW_ADSP2_YM 0x06
 
-#pragma pack(push, 1)
-
-struct wmfw_header {
-    char magic[4];
-    uint32_t len;
-    uint16_t rev;
-    uint8_t core;
-    uint8_t ver;
-};
-
-struct wmfw_adsp2_sizes {
-    uint32_t xm;
-    uint32_t ym;
-    uint32_t pm;
-    uint32_t zm;
-};
-
-struct wmfw_footer {
-    uint64_t timestamp;
-    uint32_t checksum;
-};
-
-struct wmfw_region {
-    uint32_t type_offset_le;
-    uint32_t len;
-    uint8_t data[];
-};
-
-#pragma pack(pop)
-
 #define MAX_FIRMWARE_REGIONS 32
 #define MAX_MAPPED_REGIONS 192
-
-enum class RegionType : uint32_t {
-    PmPacked = 0x10,
-    XmPacked = 0x11,
-    YmPacked = 0x12,
-    XmUnpacked = 0x5,
-    YmUnpacked = 0x6,
-    AlgorithmData = 0xF2,
-    Metadata = 0xFC,
-    NameText = 0xFE,
-    InfoText = 0xFF,
-    Unknown = 0xFFFF,
-
-    PM_PACKED = PmPacked,
-    XM_PACKED = XmPacked,
-    YM_PACKED = YmPacked,
-    XM_UNPACKED = XmUnpacked,
-    YM_UNPACKED = YmUnpacked,
-    ALGORITHM_DATA = AlgorithmData,
-    METADATA = Metadata,
-    NAME_TEXT = NameText,
-    INFO_TEXT = InfoText,
-    UNKNOWN = Unknown,
-};
 
 enum class MappingStatus {
     Ok = 0,

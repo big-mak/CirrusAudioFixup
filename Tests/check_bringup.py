@@ -27,7 +27,7 @@ preamble = r'''
 #include "Devices/CS35L41/Playback.hpp"
 using UInt8=uint8_t; using UInt16=uint16_t; using UInt32=uint32_t;
 using IOReturn=int;
-struct Timer { void cancelTimeout() {} void setTimeoutMS(unsigned) {} };
+struct Timer { void enable() {} void disable() {} void cancelTimeout() {} void setTimeoutMS(unsigned) {} };
 struct OSString {
     std::string value;
     static OSString* withCString(const char* s) { return new OSString{s}; }
@@ -59,6 +59,8 @@ public:
     size_t mAmpCount{2};
     CS35L41Amp mAmps[2]{};
     Timer* mProbeTimer=nullptr;
+    Timer* mAmpInterrupt=nullptr;
+    bool configureAmplifierInterrupt() { return true; }
     bool mPowerAvailable=true,mStopping=false,mNeedsReinitialization=false;
     bool mDebugPhaseHalted=false;
     void clearHdaCache() {}
@@ -134,8 +136,11 @@ public:
     bool applyASP(CS35L41Amp& a) { return !fail(a,"asp"); }
     bool applyGPIO(CS35L41Amp& a) { return !fail(a,"gpio"); }
     bool configureHardware(CS35L41Amp& a) { return !fail(a,"platform"); }
+    bool delayIdentity=false;
     void discoverFirmware(CS35L41Amp& a) {
         ++discoveries;
+        a.firmwareIdentityPending=delayIdentity;
+        if (delayIdentity) return;
         static uint8_t blob=1;
         a.wmfwData=a.binData=fail(a,"missing-firmware") ? nullptr : &blob;
         a.wmfwSize=a.binSize=1;
@@ -210,6 +215,16 @@ int main() {
           "failed second amp still receives synchronous cleanup");
     check(phaseFailure.properties["Cirrus_Driver_Verdict"]=="FAULT_LATCHED",
           "fault takes precedence over debug phase verdict");
+    CirrusAudioFixup identityDelay;
+    identityDelay.delayIdentity=true;
+    identityDelay.fullDriverFlow();
+    check(!identityDelay.mAmps[0].playbackFaulted && !identityDelay.mAmps[1].playbackFaulted &&
+          identityDelay.uploads==0 && identityDelay.properties["Cirrus_Driver_Verdict"]=="WAITING_FOR_CODEC_IDENTITY",
+          "zero boot identity defers upload without latching unsupported firmware");
+    identityDelay.delayIdentity=false;
+    identityDelay.fullDriverFlow();
+    check(identityDelay.uploads==2 && identityDelay.properties["Cirrus_Driver_Verdict"]=="READY_DSP",
+          "identity publication permits complete stereo bringup");
     CirrusAudioFixup ro; ro.readonly=true; ro.fullDriverFlow();
     check(ro.io==0 && ro.uploads==0,"readonly flow never writes hardware");
     CirrusAudioFixup unknown; unknown.mAmps[0].model=cirrus::core::CodecModel::CS35L56; unknown.fullDriverFlow();

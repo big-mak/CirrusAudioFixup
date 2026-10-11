@@ -83,6 +83,7 @@ capture acpi /usr/sbin/ioreg -lw0 -p IOACPIPlane
 capture power-plane /usr/sbin/ioreg -lw0 -p IOPower
 
 capture cirrus-fixup-ioreg /usr/sbin/ioreg -lw0 -p IOService -r -c CirrusAudioFixup
+capture cirrus-bootstrap-ioreg /usr/sbin/ioreg -lw0 -p IOService -r -c CirrusAudioBootstrap -d 1
 capture voodoo-i2c-ioreg /usr/sbin/ioreg -lw0 -p IOService -r -c VoodooI2CDeviceNub
 capture hda-controller-ioreg /usr/sbin/ioreg -lw0 -p IOService -r -c AppleHDAController
 capture hda-driver-ioreg /usr/sbin/ioreg -lw0 -p IOService -r -c AppleHDA

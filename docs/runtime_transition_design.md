@@ -65,9 +65,9 @@ requested. Consumers must not interpret it as proof of audible output.
 | PLL readiness | 20 ms |
 | Prepared endpoint waiting for its peer | 100 ms |
 
-Deadlines are armed after the relevant register sequence. Status reads also
-check elapsed time after the synchronous transfer. A late mailbox response
-cannot establish timely acknowledgement. A delayed timer does not receive
+Deadlines are armed after the relevant register sequence. Each poll observes status before declaring an expired wait. A ready response
+is accepted even when its synchronous transfer completed after the deadline,
+as in Linux polling; an unsatisfied response expires without a new retry window. A delayed timer does not receive
 a fresh retry window merely because few callbacks ran.
 
 The provider's addressed transfer is still synchronous. A deadline cannot
@@ -80,15 +80,59 @@ guarantee end-to-end audio switching within a specific duration.
 | --- | --- | --- |
 | Runtime transition state machine | Implemented for playback start and cleanup | PM quiesce, initialization and transport remain synchronous |
 | Coordinated stereo preparation | Implemented readiness barrier and pair rollback | Physical stereo timing and switching latency |
-| IRQ, faults and sleep/hibernate | Existing masked status checks and synchronous sleep/wake retained | No verified GPIO IRQ provider contract; runtime hibernate/regcache parity is not implemented |
+| IRQ, faults and sleep/hibernate | Existing masked status checks and synchronous sleep/wake retained | Opt-in reference protection IRQ with polling backup; runtime hibernate/regcache parity is not implemented |
 | Windows analysis | Mailbox helper and direct callers inspected | Full caller semantics, tuning selection, volume ramp, calibration and IRQ/hibernate reconstruction remain incomplete |
 | Backend separation | Runtime register phases extracted and unsupported models rejected | Firmware discovery/upload/boot and several helpers remain service-owned |
-| Target verification | Host suites and macOS-target object compilation | Xcode link/dSYM, actual hook loading, provider identity and hardware playback |
+| Target verification | Local Debug/Release bundles and prior Debug target playback | New bundle boot, timing comparison, sleep/wake and wider OS/board matrix |
 
-The current host is Windows and has no `xcodebuild`. No remote macOS executor
-is configured for this pass. Existing CI builds both Xcode configurations and
-checks bundles and symbols, but no CI result for these uncommitted changes
-is claimed. No commit, push or release was performed.
+The current host is macOS. Local Xcode Debug and Release bundles are checked
+for metadata, architecture, matching dSYM UUID and OpenCore vtable layout.
+The earlier fixed Debug bundle has target playback evidence; each subsequent
+bundle still needs its own boot and switching measurements.
+
+## Preparation overhead and measurement
+
+Pending preparation skips the recurring active-health/logging sweep. Its phase
+checks, protection observation and stereo commit checks remain required.
+Quiet operation skips the log-only DSP timestamp and ASP diagnostic snapshot.
+The callback still performs synchronous addressed I2C; it is not a hard realtime
+execution guarantee. No acknowledgement deadline has been shortened.
+
+Each successful pair commit publishes `Cirrus_Playback_PrepareMs_left` and
+`Cirrus_Playback_PrepareMs_right`. These measure monotonic elapsed time from
+the endpoint's first preparation write through pair commit. They include I2C
+and callback delays, but exclude jack detection before preparation and audio
+buffer latency after unmute. Compare repeated cycles with the same workload,
+volume, firmware and boot options; report distributions, not one fastest sample.
+
+## Provider review
+
+The supplied custom source at `/Users/hoaug/Documents/VoodooI2C` exports addressed
+combined transfers. DeviceNub interrupt APIs forward to its GPIO pin or ACPI
+interrupt. The target snapshot declares GPIO pin 84, GPIO IRQ mode 3. Controller
+power changes serialize against the I2C bus lock, disable the bus and its controller
+interrupt during suspend, and reinitialize on wake.
+
+This verifies API ownership, not amp interrupt delivery. The current amp setup
+masks IRQ1/IRQ2. A complete amp IRQ path additionally needs verified GPIO2 pad
+function and polarity, paired-source dispatch, acknowledgement, and safe suspend
+ordering. GPIO1 drives the existing external-supply sequence and must not be
+repurposed as an interrupt. Linux hibernate also depends on boost topology and
+DSP wake/retry semantics; copying only its mailbox command is insufficient.
+`-cirrusirq` now enables a reference-only shared protection IRQ path with polling
+backup. It requires GPIO mode, pin 84 and IRQ type 3. It applies the captured
+GPIO2 open-drain function and protection mask, preserves GPIO1, restores polling
+masks on setup failure, disables delivery before PM/teardown, and reconfigures on
+wake. A protection fault latches and cleans up both endpoints without releasing
+the protection source. An unexplained shared interrupt disables delivery instead
+of spinning on an asserted level. Default boot keeps polling until this new path
+has target delivery/sleep validation.
+
+The local Linux capture (`CS35L41_AIO`) shows both amps sharing GPIO84, GPIO pad
+`0x02000000`, GPIO2 control `0x81000001`, and IRQ1 mask `0x7FFD7E3F`. Its IRQ
+counter is zero, so registration is supported but observed fault delivery is not.
+Runtime hibernate still needs implementation and target wake validation; it is
+not a completed P3 item.
 
 ## Regression coverage
 

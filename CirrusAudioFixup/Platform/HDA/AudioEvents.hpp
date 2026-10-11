@@ -20,15 +20,20 @@ struct AudioEventState {
     uint32_t generation{0};
 };
 
+}
+
 // Hooks never acquire the amplifier workloop gate. This event source owns a
 // short mailbox lock; the workloop consumes the latest state, so a rapid series
 // of jack changes cannot leave a queue of obsolete power-up requests.
-class AudioEventSource : public IOEventSource {
-    OSDeclareDefaultStructors(AudioEventSource)
+// OpenCore's IOKit vtable linker requires the concrete metaclass in the global
+// namespace. Keep a namespace alias below for the driver-facing API.
+class CirrusAudioEventSource : public IOEventSource {
+    OSDeclareDefaultStructors(CirrusAudioEventSource)
 
 public:
+    using AudioEventState = cirrus::platform::hda::AudioEventState;
     using Handler = void (*)(OSObject*, const AudioEventState&);
-    static AudioEventSource* create(OSObject* owner, IOService* controller, Handler handler);
+    static CirrusAudioEventSource* create(OSObject* owner, IOService* controller, Handler handler);
     static bool hooksReady();
     bool attach();
     void detach();
@@ -51,4 +56,6 @@ private:
     bool belongsToController(IORegistryEntry* entry);
 };
 
+namespace cirrus::platform::hda {
+using AudioEventSource = ::CirrusAudioEventSource;
 }

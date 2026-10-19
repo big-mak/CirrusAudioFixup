@@ -1,5 +1,10 @@
+// Lifecycle stages, failure records and register-transfer trace data.
+// The first failure preserves the original fault. The latest failure records
+// later cleanup or retry results without erasing that starting point.
+// See LICENSE for distribution terms.
 #pragma once
 
+#include "Diagnostics/TraceTypes.hpp"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -11,15 +16,6 @@ constexpr int kIOReturnSuccess = 0;
 #endif
 
 namespace cirrus::diagnostics {
-
-enum class TraceSource : uint32_t { Probe = 0, Dump, Consistency, Firmware, Playback, Other };
-
-inline constexpr TraceSource TRACE_PROBE = TraceSource::Probe;
-inline constexpr TraceSource TRACE_DUMP = TraceSource::Dump;
-inline constexpr TraceSource TRACE_CONSISTENCY = TraceSource::Consistency;
-inline constexpr TraceSource TRACE_FIRMWARE = TraceSource::Firmware;
-inline constexpr TraceSource TRACE_PLAYBACK = TraceSource::Playback;
-inline constexpr TraceSource TRACE_OTHER = TraceSource::Other;
 
 enum class DriverStage : uint32_t {
     None = 0,
@@ -97,11 +93,14 @@ enum class DiagnosticFailure : uint32_t {
     OtpBootError,
     AmpProtection,
     Calibration,
+    // Keep this value last to preserve published failure numbers.
+    SpiTransfer,
 };
 
 inline constexpr DiagnosticFailure DIAG_OK = DiagnosticFailure::Ok;
 inline constexpr DiagnosticFailure DIAG_PROVIDER_MISSING = DiagnosticFailure::ProviderMissing;
 inline constexpr DiagnosticFailure DIAG_I2C_TRANSFER = DiagnosticFailure::I2cTransfer;
+inline constexpr DiagnosticFailure DIAG_SPI_TRANSFER = DiagnosticFailure::SpiTransfer;
 inline constexpr DiagnosticFailure DIAG_RESET_GPIO = DiagnosticFailure::ResetGpio;
 inline constexpr DiagnosticFailure DIAG_DEVICE_ID = DiagnosticFailure::DeviceId;
 inline constexpr DiagnosticFailure DIAG_RESET_WRITE = DiagnosticFailure::ResetWrite;
@@ -135,6 +134,9 @@ struct DiagnosticState {
     DriverStage stage{STAGE_NONE};
     DriverStage lastGoodStage{STAGE_NONE};
     DiagnosticFailure firstFailure{DIAG_OK};
+    DriverStage firstStage{STAGE_NONE};
+    uint32_t firstReg{0}, firstExpected{0}, firstActual{0};
+    IOReturn firstIOReturn{kIOReturnSuccess};
     DiagnosticFailure latestFailure{DIAG_OK};
     uint32_t failureCount{0};
     uint32_t reg{0};
@@ -142,6 +144,18 @@ struct DiagnosticState {
     uint32_t actual{0};
     IOReturn ioReturn{kIOReturnSuccess};
     DiagnosticFailure snapshotFailure{DIAG_OK};
+};
+
+// Workloop-owned publication cache; comparisons allocate nothing. UINT32_MAX
+// forces the first snapshot to publish. Native returns are stored as raw 32 bits.
+struct RuntimeDiagnosticSnapshot {
+    uint32_t stage{UINT32_MAX}, failureStage{0}, firstFailure{0}, latestFailure{0}, cleanup{0}, failures{0};
+    bool update(const RuntimeDiagnosticSnapshot& next) {
+        const bool changed = stage != next.stage || failureStage != next.failureStage || firstFailure != next.firstFailure ||
+                             latestFailure != next.latestFailure || cleanup != next.cleanup || failures != next.failures;
+        *this = next;
+        return changed;
+    }
 };
 
 struct TraceEntry {

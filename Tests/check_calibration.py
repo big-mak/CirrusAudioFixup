@@ -1,15 +1,20 @@
+from production_source_fixture import source as production_source, chip_state
 import re
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'CirrusAudioFixup/CirrusAudioFixup.cpp').read_text(encoding='utf-8')
+SOURCE = production_source()
 start = re.search(r'struct\s+cs35l41_amp_cal_data\s*\{', SOURCE).start()
-end = start + re.search(r'\nvoid\s+CirrusAudioFixup::scheduleReadOnlyProbe', SOURCE[start:]).start()
-calibration = SOURCE[start:end]
+struct_end=SOURCE.index('} __attribute__((packed));',SOURCE.index('struct cs35l41_amp_efi_data',start))+len('} __attribute__((packed));')
+method_start=SOURCE.index('bool CirrusAudioFixup::applyCalibration(')
+method_end=SOURCE.index('\n}',method_start)+2
+crc_start=SOURCE.index('static uint32_t crc32Le(')
+crc_end=SOURCE.index('\n}',crc_start)+2
+calibration=SOURCE[crc_start:crc_end]+SOURCE[start:struct_end]+SOURCE[method_start:method_end]
 gate_start = re.search(r'if\s*\(!applyCalibration\(amp,\s*image\)\)', SOURCE).start()
-m_boot = re.search(r'bool\s+booted\s*=\s*bringupDSP\(amp\);', SOURCE[gate_start:])
+m_boot = re.search(r'bool\s+booted\s*=\s*bringUpDSP\(amp\);', SOURCE[gate_start:])
 gate_end = gate_start + m_boot.end()
 gate = SOURCE[gate_start:gate_end]
 preamble = r'''
@@ -63,7 +68,7 @@ struct FirmwareImage {};
 struct Algorithm { uint32_t id=0xCD; };
 struct Control { uint32_t type=5,len=4; };
 struct WMFWControlRef { Algorithm* algorithm; Control* control; uint32_t address; };
-struct CirrusFirmwareParser {
+struct WMFWParser {
     static bool missing;
     static bool findControl(const FirmwareImage*,const char* n,WMFWControlRef& r) {
         static Algorithm a; static Control c; r.algorithm=&a; r.control=&c;
@@ -72,14 +77,18 @@ struct CirrusFirmwareParser {
     }
     static bool resolveControl(const FirmwareImage&,WMFWControlRef& r,uint32_t& address) { address=r.address; return true; }
 };
-bool CirrusFirmwareParser::missing=false;
+bool WMFWParser::missing=false;
+namespace cirrus::core { enum class AudioChannel : uint8_t { Left = 0, Right = 1 }; }
 struct CS35L41Amp {
     uint8_t address=0x40; const char* name="L";
+    void* registerIO=nullptr; uint8_t endpointIndex=0;
     bool firmwareValidated=false,playbackFaulted=false;
+    cirrus::core::AudioChannel channel=cirrus::core::AudioChannel::Left;
 };
 using AmplifierState = CS35L41Amp;
-namespace cirrus { namespace devices { namespace cs35l41 { namespace registers { constexpr uint8_t kI2cAddressRight = 0x41; } } } }
-void IOFree(void*,size_t) {}
+namespace cirrus::devices::amplifiers::cs35l41::registers { constexpr uint8_t kI2cAddressRight = 0x41; }
+unsigned freedImages=0;
+void IOFree(void*,size_t) { ++freedImages; }
 class CirrusAudioFixup {
 public:
     bool skip=false,booted=false,stopped=false;
@@ -99,7 +108,9 @@ public:
     }
     void recordDiagnosticFailure(AmplifierState&,unsigned) { ++failures; }
     bool stopDSP(AmplifierState&) { stopped=true; return true; }
-    bool bringupDSP(AmplifierState&) { booted=true; return true; }
+    bool bringUpDSP(AmplifierState&) { booted=true; return true; }
+    bool phaseHalted=false;
+    bool stopAfterDebugStage(const char*) { return phaseHalted; }
     bool applyCalibration(AmplifierState&,const FirmwareImage*);
     void boot(AmplifierState& amp,FirmwareImage* image);
 };
@@ -111,6 +122,7 @@ OSData efi(unsigned count=2) {
     OSData d; d.bytes.resize(48);
     cs35l41_amp_efi_data* p=(cs35l41_amp_efi_data*)d.bytes.data();
     p->size=48; p->count=count;
+    p->data[0].calTime[0]=1; p->data[1].calTime[0]=1;
     p->data[0].calAmbient=23; p->data[0].calStatus=1; p->data[0].calR=5846;
     p->data[1].calAmbient=25; p->data[1].calStatus=1; p->data[1].calR=5933;
     return d;
@@ -127,6 +139,58 @@ int main() {
               d.memory[8]==1 && d.memory[12]==d.memory[4]+1,"EFI channel/ambient/checksum match Linux");
     }
     amp.address=0x40;
+    auto targeted=data;
+    auto* targets=(cs35l41_amp_efi_data*)targeted.bytes.data();
+    targets->data[0].calTarget[0]=0x55667788; targets->data[0].calTarget[1]=0x11223344;
+    targets->data[1].calTarget[0]=0xDDEEFF00; targets->data[1].calTarget[1]=0x99AABBCC;
+    IORegistryEntry::data=&targeted;
+    CirrusAudioFixup reordered;
+    reordered.memory[0x17044]=0x99AABBCC; reordered.memory[0x17040]=0xDDEEFF00;
+    check(reordered.applyCalibration(amp,&image) && reordered.memory[4]==5933,
+          "silicon UID takes precedence over channel index");
+    CirrusAudioFixup mismatched;
+    mismatched.memory[0x17044]=0x12345678; mismatched.memory[0x17040]=1;
+    check(mismatched.applyCalibration(amp,&image) && mismatched.writes==0,
+          "unmatched nonzero target is never applied to another speaker");
+    CirrusAudioFixup zeroUid;
+    check(zeroUid.applyCalibration(amp,&image) && zeroUid.memory[4]==5846,
+          "zero silicon UID permits Linux index fallback");
+    targets->data[1].calTime[0]=0;
+    CirrusAudioFixup emptyTarget;
+    emptyTarget.memory[0x17044]=0x99AABBCC; emptyTarget.memory[0x17040]=0xDDEEFF00;
+    check(emptyTarget.applyCalibration(amp,&image) && emptyTarget.writes==0,
+          "UID match cannot revive an unused timestamp slot");
+    targets->data[1].calTime[0]=1;
+    for(unsigned n=1;n<=2;++n) {
+        CirrusAudioFixup d; d.failRead=n;
+        check(!d.applyCalibration(amp,&image) && d.writes==0,
+              "UID read failure blocks calibration writes");
+        check(d.properties["Cirrus_Calibration_Status_L"]=="UID_READ_FAILED",
+              "UID transport failure is not reported as missing calibration");
+    }
+    targets->data[0].calTarget[0]=targets->data[0].calTarget[1]=0;
+    CirrusAudioFixup wildcard;
+    wildcard.memory[0x17044]=0x12345678; wildcard.memory[0x17040]=1;
+    check(wildcard.applyCalibration(amp,&image) && wildcard.memory[4]==5846,
+          "wildcard entry permits index fallback");
+    auto singleton=targeted;
+    auto* single=(cs35l41_amp_efi_data*)singleton.bytes.data();
+    single->count=1; single->data[0]=targets->data[1];
+    IORegistryEntry::data=&singleton;
+    amp.address=0x41;
+    CirrusAudioFixup outsideIndex;
+    outsideIndex.memory[0x17044]=0x99AABBCC; outsideIndex.memory[0x17040]=0xDDEEFF00;
+    check(outsideIndex.applyCalibration(amp,&image) && outsideIndex.memory[4]==5933,
+          "UID lookup works even when channel index exceeds entry count");
+    amp.address=0x40;
+    auto emptySlot=data;
+    ((cs35l41_amp_efi_data*)emptySlot.bytes.data())->data[0].calTime[0]=0;
+    IORegistryEntry::data=&emptySlot;
+    CirrusAudioFixup unused;
+    check(unused.applyCalibration(amp,&image) && unused.writes==0,
+          "unused EFI slot leaves firmware defaults untouched");
+    check(unused.properties["Cirrus_Calibration_Status_L"]=="NOT_AVAILABLE",
+          "unused EFI slot is not reported as applied calibration");
     for(unsigned n=0;n<48;++n) {
         auto shortData=data; shortData.bytes.resize(n); IORegistryEntry::data=&shortData;
         CirrusAudioFixup d;
@@ -158,12 +222,16 @@ int main() {
     CirrusAudioFixup badAmbient;
     check(!badAmbient.applyCalibration(amp,&image) && !badAmbient.writes,"ambient must fit EFI signed byte");
     args.clear(); IORegistryEntry::data=&data;
-    CirrusFirmwareParser::missing=true; CirrusAudioFixup missingControl;
+    WMFWParser::missing=true; CirrusAudioFixup missingControl;
     missingControl.boot(amp,&image);
     check(!missingControl.booted && missingControl.failures,"missing control blocks boot");
-    CirrusFirmwareParser::missing=false;
+    WMFWParser::missing=false;
     CirrusAudioFixup normal; normal.boot(amp,&image);
     check(normal.booted && amp.firmwareValidated,"valid calibration permits boot");
+    unsigned beforePhase=freedImages;
+    CirrusAudioFixup phase; phase.phaseHalted=true; phase.boot(amp,&image);
+    check(amp.firmwareValidated && !phase.booted,"firmware phase validates but never boots DSP");
+    check(freedImages==beforePhase+1,"firmware debug halt releases the parsed image");
     IORegistryEntry::legacyOnly=true;
     CirrusAudioFixup legacy;
     check(legacy.applyCalibration(amp,&image),"unqualified EFI property fallback accepted");
@@ -176,14 +244,14 @@ int main() {
     const char* expectedStatuses[]={"NOT_AVAILABLE","SKIPPED_BY_BOOT_ARG","CONTROL_RESOLUTION_FAILED",
         "INVALID_EFI_DATA","INVALID_BOOT_ARG_DATA","VERIFY_FAILED","VERIFY_FAILED","VERIFY_FAILED"};
     for(unsigned mode=0;mode<9;++mode) {
-        args.clear(); IORegistryEntry::data=&data; CirrusFirmwareParser::missing=false;
+        args.clear(); IORegistryEntry::data=&data; WMFWParser::missing=false;
         CirrusAudioFixup d;
         CS35L41Amp right; right.name="R"; right.address=0x41;
         check(d.applyCalibration(amp,&image) && d.applyCalibration(right,&image),"seed both channel properties");
         check(d.numbers.size()==8,"both channels publish four verified values");
         if(mode==0) IORegistryEntry::data=nullptr;
         if(mode==1) d.skip=true;
-        if(mode==2) CirrusFirmwareParser::missing=true;
+        if(mode==2) WMFWParser::missing=true;
         if(mode==3) IORegistryEntry::data=&wrongType;
         if(mode==4) { IORegistryEntry::data=nullptr; args={{"-cirruscalr0l",5846}}; }
         if(mode==5) d.failWrite=d.writes+1;
@@ -198,12 +266,12 @@ int main() {
         if(mode<8) check(d.properties["Cirrus_Calibration_Status_L"]==expectedStatuses[mode],"repeat status describes current attempt");
         else check(!d.properties.count("Cirrus_Calibration_Status_L"),"null image cannot retain successful status");
         d.skip=false; d.failWrite=d.failRead=d.corruptRead=0;
-        args.clear(); IORegistryEntry::data=&data; CirrusFirmwareParser::missing=false;
+        args.clear(); IORegistryEntry::data=&data; WMFWParser::missing=false;
         check(d.applyCalibration(amp,&image) && d.numbers.size()==8,"successful retry republishes current evidence");
     }
     check(borrowedReads==0,"EFI data retained throughout parsing");
     check(outstandingRefs==0 && data.refs==1 && wrongType.refs==1,"property references balanced across all paths");
-    printf("%s calibration: EFI bounds, ownership, L/R values, 12 I/O faults, boot gate, repeated state transitions\n",failures?"FAIL":"PASS");
+    printf("%s calibration: EFI bounds, UID priority/wildcards/mismatch, UID read faults, ownership, L/R values, 12 I/O faults, boot gate, repeated state transitions\n",failures?"FAIL":"PASS");
     return failures?1:0;
 }
 '''

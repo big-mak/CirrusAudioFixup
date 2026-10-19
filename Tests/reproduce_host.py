@@ -5,7 +5,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CODEC = ROOT / 'CirrusAudioFixup/Firmware/WMFW'
-DEVICE = ROOT / 'CirrusAudioFixup/Devices/CS35L41/Resources'
+DEVICE = ROOT / 'CirrusAudioFixup/Devices/Amplifiers/CS35L41/Resources'
 with tempfile.TemporaryDirectory(prefix='cirrus-host-check-') as directory:
     tmp = Path(directory)
     (tmp / 'IOKit').mkdir()
@@ -39,14 +39,14 @@ struct OSObject {};
 struct OSNumber : OSObject { unsigned unsigned32BitValue() { return 0; } };
 constexpr int TRACE_OTHER = 0;
 ''', encoding='utf-8')
-    uploader = (CODEC / 'FirmwareUploader.hpp').read_text(encoding='utf-8')
+    uploader = (CODEC / 'WMFWUploader.hpp').read_text(encoding='utf-8')
     uploader = uploader.replace('#include "Core/RegisterIO.hpp"', '#include "fake.hpp"').replace('#include "Firmware/WMFW/WMFWParser.hpp"', '#include "WMFWParser.hpp"')
     (tmp / 'uploader.hpp').write_text(uploader, encoding='utf-8')
     resources = (DEVICE / 'Firmware.hpp').read_text(encoding='utf-8')
     arrays = '\n'.join(re.findall(r'const uint8_t \w+\[\s*\d*\s*\] = \{.*?\};', resources, re.S))
     (tmp / 'arrays.hpp').write_text(arrays, encoding='utf-8')
-    header = (ROOT / 'CirrusAudioFixup/CirrusAudioFixup.hpp').read_text(encoding='utf-8')
-    resource_type = header[header.index('struct FirmwareResource {'):header.index('class CirrusAudioFixup :')]
+    header = (ROOT / 'CirrusAudioFixup/Devices/Amplifiers/CS35L41/Resources/ResourceSchema.hpp').read_text(encoding='utf-8')
+    resource_type = header[header.index('struct FirmwareResource {'):]
     table = resources[resources.index('const FirmwareResource cs35l41Firmware[]'):]
     (tmp / 'resources.hpp').write_text(resource_type + table, encoding='utf-8')
     (tmp / 'fake.hpp').write_text(r'''

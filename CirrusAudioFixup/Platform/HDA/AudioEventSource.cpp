@@ -1,0 +1,482 @@
+// Preserve IOAudioFamily behavior and observe completed state changes.
+// Hooks remain installed until shutdown; module unload is rejected.
+// See LICENSE for distribution terms.
+#define PRODUCT_NAME CirrusAudioFixup
+#include "AudioEventSource.hpp"
+#include <Headers/kern_api.hpp>
+#include <IOKit/IORegistryEntry.h>
+#include <libkern/c++/OSNumber.h>
+#if defined(KERNEL)
+#include "Support/BuildConfig.hpp"
+#include <IOKit/IOCatalogue.h>
+#include <IOKit/IOTimerEventSource.h>
+#include <libkern/c++/OSOrderedSet.h>
+#endif
+
+bool ADDPR(debugEnabled) = false;
+uint32_t ADDPR(debugPrintDelay) = 0;
+
+using cirrus::platform::hda::AudioEventSource;
+using cirrus::platform::hda::AudioEventState;
+
+// Match IOResources so module-start registration does not wait for the I2C
+// provider. Lilu closes its registration window before late device matching;
+// this service only anchors early loading and never touches the amplifier.
+class CirrusAudioBootstrap : public IOService {
+    OSDeclareDefaultStructors(CirrusAudioBootstrap)
+#if defined(KERNEL)
+        IOWorkLoop* auditLoop = nullptr;
+    IOTimerEventSource* auditTimer = nullptr;
+    unsigned auditSamples = 0;
+    bool auditTimerAttached = false;
+
+    void auditMatching() {
+        IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap AUDIT_BEGIN sample=%u\n", auditSamples + 1);
+        setProperty("Cirrus_Matching_Audit_Sample", uint64_t(++auditSamples), 32);
+        // Read the in-kernel catalogue. The userspace GetContents RPC is no
+        // longer supported; a missing result must not be reported as zero.
+        IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap CATALOGUE_BEGIN\n");
+        auto* matching = OSDictionary::withCapacity(1);
+        if (matching) {
+            auto* bundle = OSString::withCString("com.hoaugtr.CirrusAudioFixup");
+            if (bundle) {
+                matching->setObject("CFBundleIdentifier", bundle);
+                bundle->release();
+                SInt32 generation = 0;
+                auto* personalities = gIOCatalogue->findDrivers(matching, &generation);
+                if (personalities) {
+                    auto* snapshot = OSArray::withCapacity(personalities->getCount());
+                    if (snapshot) {
+                        for (unsigned i = 0; i < personalities->getCount(); ++i)
+                            snapshot->setObject(personalities->getObject(i));
+                        setProperty("Cirrus_Catalogue_Personalities", snapshot);
+                        setProperty("Cirrus_Catalogue_Status", "CAPTURED");
+                        snapshot->release();
+                    } else
+                        setProperty("Cirrus_Catalogue_Status", "SNAPSHOT_ALLOCATION_FAILED");
+                    setProperty("Cirrus_Catalogue_Generation", uint64_t(uint32_t(generation)), 32);
+                    personalities->release();
+                } else
+                    setProperty("Cirrus_Catalogue_Status", "QUERY_FAILED");
+            }
+            matching->release();
+        }
+        IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap CATALOGUE_END\n");
+        IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap REGISTRY_BEGIN\n");
+        auto* acpi = serviceMatching("IOACPIPlatformDevice");
+        if (acpi) {
+            auto* name = OSString::withCString("CSC3551");
+            if (name) {
+                acpi->setObject("IONameMatch", name);
+                name->release();
+                auto* iterator = getMatchingServices(acpi);
+                if (iterator) {
+                    unsigned count = 0;
+                    while (auto* provider = OSDynamicCast(IOService, iterator->getNextObject())) {
+                        ++count;
+                        setProperty("Cirrus_SPI_Provider_Name", provider->getName());
+                        setProperty("Cirrus_SPI_Provider_ID", provider->getRegistryEntryID(), 64);
+                        SInt32 providerGeneration = 0;
+                        auto* candidates = gIOCatalogue->findDrivers(provider, &providerGeneration);
+                        if (candidates) {
+                            auto* snapshot = OSArray::withCapacity(candidates->getCount());
+                            if (snapshot) {
+                                for (unsigned i = 0; i < candidates->getCount(); ++i)
+                                    snapshot->setObject(candidates->getObject(i));
+                                setProperty("Cirrus_SPI_Provider_Catalogue_Candidates", snapshot);
+                                snapshot->release();
+                            }
+                            candidates->release();
+                        }
+                    }
+                    setProperty("Cirrus_SPI_Provider_Count", uint64_t(count), 32);
+                    iterator->release();
+                }
+            }
+            acpi->release();
+        }
+        IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap REGISTRY_END\n");
+        IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap AUDIT_END\n");
+    }
+    static void auditTick(OSObject* owner, IOTimerEventSource*) {
+        auto* self = OSDynamicCast(CirrusAudioBootstrap, owner);
+        if (!self)
+            return;
+        self->auditMatching();
+        if (self->auditSamples < 4)
+            self->auditTimer->setTimeoutMS(self->auditSamples == 2 ? 9000 : 20000);
+    }
+#endif
+public:
+    bool start(IOService* provider) override {
+        if (checkKernelArgument("-cirrusoff"))
+            return false;
+#if defined(KERNEL)
+        if (cirrus::support::kDefaultVerboseLogging || checkKernelArgument("-cirrusdbg"))
+            IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap START_BEGIN\n");
+#endif
+        if (!IOService::start(provider))
+            return false;
+#if defined(KERNEL)
+        if (cirrus::support::kDefaultVerboseLogging || checkKernelArgument("-cirrusdbg")) {
+            setProperty("Cirrus_Bootstrap_Status", "STARTED");
+            setProperty("Cirrus_Build_Configuration", cirrus::support::kBuildConfiguration);
+            // Keep matching/catalogue enumeration out of IOResources start.
+            // A separate timer checks matching state after start returns.
+            auditLoop = IOWorkLoop::workLoop();
+            auditTimer = IOTimerEventSource::timerEventSource(this, auditTick);
+            if (auditLoop && auditTimer && auditLoop->addEventSource(auditTimer) == kIOReturnSuccess) {
+                auditTimerAttached = true;
+                auditTimer->setTimeoutMS(1000);
+                setProperty("Cirrus_Matching_Audit_Timer", "ARMED");
+            } else
+                setProperty("Cirrus_Matching_Audit_Timer", "UNAVAILABLE");
+            IOLog("CirrusAudioFixup: BOOT_FLOW bootstrap START_END audit=%s\n", auditTimerAttached ? "DEFERRED" : "UNAVAILABLE");
+        }
+#endif
+        return true;
+    }
+#if defined(KERNEL)
+    void stop(IOService* provider) override {
+        if (auditTimer)
+            auditTimer->cancelTimeout();
+        if (auditTimerAttached) {
+            auditLoop->removeEventSource(auditTimer);
+            auditTimerAttached = false;
+        }
+        IOService::stop(provider);
+    }
+    void free() override {
+        OSSafeReleaseNULL(auditTimer);
+        OSSafeReleaseNULL(auditLoop);
+        IOService::free();
+    }
+#endif
+};
+
+OSDefineMetaClassAndStructors(CirrusAudioBootstrap, IOService)
+
+    namespace {
+    constexpr uint32_t kSelectorType = 0x736C6374;
+    constexpr uint32_t kOutputControl = 0x6F757470;
+    constexpr uint32_t kInternalSpeaker = 0x6973706B;
+    constexpr uint32_t kHeadphones = 0x6864706E;
+    constexpr uint32_t kEngineRunning = 1;
+    IOLock* listenersLock = nullptr;
+    AudioEventSource* listeners[4]{};
+    bool controlHook = false;
+    bool engineHook = false;
+    bool registered = false;
+    mach_vm_address_t originalUpdateValue = 0;
+    mach_vm_address_t originalSetState = 0;
+    const char* audioPaths[] = {"/System/Library/Extensions/IOAudioFamily.kext/Contents/MacOS/IOAudioFamily"};
+    KernelPatcher::KextInfo audioInfo[] = {{"com.apple.iokit.IOAudioFamily", audioPaths, 1, {true}, {}, 0}};
+
+    bool readNumber(IORegistryEntry * entry, const char* key, uint32_t& value) {
+        // Registry values can be replaced on another thread. A retained property
+        // keeps the old OSNumber alive until this observation has finished.
+        auto* property = entry->copyProperty(key);
+        auto* number = OSDynamicCast(OSNumber, property);
+        if (number)
+            value = number->unsigned32BitValue();
+        if (property)
+            property->release();
+        return number != nullptr;
+    }
+
+    // Retain listeners while holding the list lock, then drop it before registry
+    // inspection or notification. Teardown removes a listener before releasing its
+    // event source; an in-flight observer therefore always owns a live reference.
+    void publish(IOService * sender, bool route, uint32_t value) {
+        AudioEventSource* targets[4]{};
+        if (!listenersLock)
+            return;
+        IOLockLock(listenersLock);
+        for (size_t i = 0; i < 4; ++i) {
+            targets[i] = listeners[i];
+            if (targets[i])
+                targets[i]->retain();
+        }
+        IOLockUnlock(listenersLock);
+        for (auto* target : targets) {
+            if (target) {
+                target->observe(sender, route, value);
+                target->release();
+            }
+        }
+    }
+
+    IOReturn updateValue(IOService * control, OSObject * value) {
+        auto result = reinterpret_cast<IOReturn (*)(IOService*, OSObject*)>(originalUpdateValue)(control, value);
+        if (result != kIOReturnSuccess)
+            return result;
+        uint32_t type = 0, subtype = 0, usage = 0;
+        auto* number = OSDynamicCast(OSNumber, value);
+        // FourCC values are IOAudioTypes.h ABI constants. Only an output selector
+        // can change the speaker route; volume and microphone controls are ignored.
+        if (number && readNumber(control, "IOAudioControlType", type) && type == kSelectorType &&
+            readNumber(control, "IOAudioControlSubType", subtype) && subtype == kOutputControl &&
+            readNumber(control, "IOAudioControlUsage", usage) && usage == kOutputControl)
+            publish(control, true, number->unsigned32BitValue());
+        return result;
+    }
+
+    uint32_t setState(IOService * engine, uint32_t state) {
+        auto previous = reinterpret_cast<uint32_t (*)(IOService*, uint32_t)>(originalSetState)(engine, state);
+        publish(engine, false, state);
+        return previous;
+    }
+
+    void loaded(void*, KernelPatcher& patcher, size_t index, mach_vm_address_t address, size_t size) {
+        if (index != audioInfo[0].loadIndex)
+            return;
+        IOLog("CirrusAudioFixup: BOOT_FLOW HDA_HOOKS_BEGIN\n");
+        // These signatures come from IOAudioFamily source and the kernel SDK,
+        // rather than private AppleHDA class layouts or guessed vtable offsets.
+        KernelPatcher::RouteRequest controlRequest("__ZN14IOAudioControl11updateValueEP8OSObject", updateValue, originalUpdateValue);
+        if (!__atomic_load_n(&controlHook, __ATOMIC_ACQUIRE))
+            __atomic_store_n(&controlHook, patcher.routeMultiple(index, &controlRequest, 1, address, size), __ATOMIC_RELEASE);
+        patcher.clearError();
+        KernelPatcher::RouteRequest engineRequest("__ZN13IOAudioEngine8setStateE19_IOAudioEngineState", setState, originalSetState);
+        if (!__atomic_load_n(&engineHook, __ATOMIC_ACQUIRE))
+            __atomic_store_n(&engineHook, patcher.routeMultiple(index, &engineRequest, 1, address, size), __ATOMIC_RELEASE);
+        patcher.clearError();
+        IOLog("CirrusAudioFixup: IOAudioFamily event hooks: output=%d engine=%d\n", controlHook, engineHook);
+        IOLog("CirrusAudioFixup: BOOT_FLOW HDA_HOOKS_END\n");
+    }
+}
+
+extern "C" __attribute__((visibility("default"))) kern_return_t CirrusAudioFixup_start(kmod_info_t*, void*) {
+    if (checkKernelArgument("-cirrusoff"))
+        return KERN_SUCCESS;
+    IOLog("CirrusAudioFixup: BOOT_FLOW MODULE_START_BEGIN\n");
+    listenersLock = IOLockAlloc();
+    if (!listenersLock) {
+        IOLog("CirrusAudioFixup: BOOT_FLOW MODULE_START_END lock-allocation-failed\n");
+        return KERN_FAILURE;
+    }
+    IOLog("CirrusAudioFixup: BOOT_FLOW LILU_ACCESS_BEGIN\n");
+    auto error = lilu.requestAccess();
+    IOLog("CirrusAudioFixup: BOOT_FLOW LILU_ACCESS_END ret=%u\n", unsigned(error));
+    if (error == LiluAPI::Error::NoError) {
+        registered = lilu.onKextLoad(audioInfo, 1, loaded) == LiluAPI::Error::NoError;
+        lilu.releaseAccess();
+    }
+    if (!registered)
+        IOLog("CirrusAudioFixup: event registration unavailable; HDA observation fallback remains active\n");
+    IOLog("CirrusAudioFixup: BOOT_FLOW MODULE_START_END registered=%u\n", unsigned(registered));
+    return KERN_SUCCESS;
+}
+
+extern "C" __attribute__((visibility("default"))) kern_return_t CirrusAudioFixup_stop(kmod_info_t*, void*) {
+    // A callback or routed function may still refer to this image, even when
+    // its provider stopped. Lilu plugins cannot safely unload after registration.
+    if (registered)
+        return KERN_FAILURE;
+    if (listenersLock) {
+        IOLockFree(listenersLock);
+        listenersLock = nullptr;
+    }
+    return KERN_SUCCESS;
+}
+
+OSDefineMetaClassAndStructors(CirrusAudioEventSource, IOEventSource)
+
+    bool CirrusAudioEventSource::hooksReady() {
+    return __atomic_load_n(&controlHook, __ATOMIC_ACQUIRE) && __atomic_load_n(&engineHook, __ATOMIC_ACQUIRE);
+}
+
+CirrusAudioEventSource* CirrusAudioEventSource::create(OSObject* target, IOService* controller, Handler handler) {
+    if (!target || !controller || !handler)
+        return nullptr;
+    auto* source = new CirrusAudioEventSource;
+    if (!source)
+        return nullptr;
+    if (!source->init(target) || !(source->mMailboxLock = IOLockAlloc())) {
+        source->release();
+        return nullptr;
+    }
+    source->mController = controller;
+    controller->retain();
+    source->mHandler = handler;
+    return source;
+}
+
+bool CirrusAudioEventSource::belongsToController(IORegistryEntry* entry) {
+    entry->retain();
+    bool found = false;
+    for (size_t depth = 0; entry && depth < 64; ++depth) {
+        if (entry == mController) {
+            found = true;
+            break;
+        }
+        auto* parent = entry->copyParentEntry(gIOServicePlane);
+        entry->release();
+        entry = parent;
+    }
+    if (entry)
+        entry->release();
+    return found;
+}
+
+bool CirrusAudioEventSource::attach() {
+    if (!hooksReady() || !listenersLock)
+        return false;
+    IOLockLock(listenersLock);
+    IOLockLock(mMailboxLock);
+    if (mAttached) {
+        IOLockUnlock(mMailboxLock);
+        IOLockUnlock(listenersLock);
+        return true;
+    }
+    for (auto& listener : listeners) {
+        if (!listener) {
+            listener = this;
+            mAttached = true;
+            break;
+        }
+    }
+    const bool attached = mAttached;
+    IOLockUnlock(mMailboxLock);
+    IOLockUnlock(listenersLock);
+    if (!attached)
+        return false;
+    refreshRoute();
+    return true;
+}
+
+// Retry seeding while route publication is pending. A live hook observation
+// wins over stale seed data under the mailbox lock in observe().
+void CirrusAudioEventSource::refreshRoute() {
+    IOLockLock(mMailboxLock);
+    bool needed = mAttached && !mState.routeKnown;
+    IOLockUnlock(mMailboxLock);
+    if (!needed)
+        return;
+    // Seed from current registry state: the selector may have changed before
+    // the amplifier service attached, with no later event until the next jack
+    // operation. Use the same validation as live observations.
+    auto* iterator = IORegistryIterator::iterateOver(mController, gIOServicePlane, kIORegistryIterateRecursively);
+    if (iterator) {
+        while (auto* entry = iterator->getNextObject()) {
+            auto* service = OSDynamicCast(IOService, entry);
+            if (!service)
+                continue;
+            uint32_t type = 0, subtype = 0, usage = 0, value = 0;
+            if (readNumber(service, "IOAudioControlType", type) && type == kSelectorType &&
+                readNumber(service, "IOAudioControlSubType", subtype) && subtype == kOutputControl &&
+                readNumber(service, "IOAudioControlUsage", usage) && usage == kOutputControl &&
+                readNumber(service, "IOAudioControlValue", value))
+                observe(service, true, value, true);
+        }
+        iterator->release();
+    }
+}
+
+void CirrusAudioEventSource::detach() {
+    if (!listenersLock)
+        return;
+    IOLockLock(listenersLock);
+    for (auto& listener : listeners)
+        if (listener == this)
+            listener = nullptr;
+    IOLockUnlock(listenersLock);
+    IOLockLock(mMailboxLock);
+    mAttached = false;
+    mPending = false;
+    IOLockUnlock(mMailboxLock);
+}
+
+void CirrusAudioEventSource::observe(IOService* sender, bool route, uint32_t value, bool seed) {
+    if (!belongsToController(sender))
+        return;
+    IORegistryEntry* engine = nullptr;
+    if (route) {
+        engine = sender->copyParentEntry(gIOServicePlane);
+        // A selector is useful only when it belongs to an audio engine. This
+        // prevents a controller-scoped control from binding an unrelated engine.
+        if (!engine || !engine->metaCast("IOAudioEngine")) {
+            if (engine)
+                engine->release();
+            return;
+        }
+    }
+    IOLockLock(mMailboxLock);
+    // Subscription is already live during registry enumeration. A callback
+    // can therefore publish a newer route after the iterator reads an old
+    // value. Initial seeding must never overwrite a completed observation.
+    if (!mAttached || (seed && mState.routeKnown) || (mEngine && (route ? engine : sender) != mEngine)) {
+        IOLockUnlock(mMailboxLock);
+        if (engine)
+            engine->release();
+        return;
+    }
+    if (route && !mEngine) {
+        // Only the built-in speaker/headphone engine identifies this binding.
+        // Unknown selectors and digital engines must not capture it first.
+        if (value != kInternalSpeaker && value != kHeadphones) {
+            IOLockUnlock(mMailboxLock);
+            engine->release();
+            return;
+        }
+        mEngine = engine;
+        engine = nullptr;
+    }
+    if (!mEngine) {
+        IOLockUnlock(mMailboxLock);
+        return;
+    }
+    auto next = mState;
+    if (route) {
+        next.routeKnown = true;
+        next.speakers = value == kInternalSpeaker;
+        uint32_t state = 0;
+        if (readNumber(mEngine, "IOAudioEngineState", state)) {
+            next.engineKnown = true;
+            next.engineRunning = state == kEngineRunning;
+        }
+    } else {
+        next.engineKnown = true;
+        next.engineRunning = value == kEngineRunning;
+    }
+    if (next.routeKnown != mState.routeKnown || next.speakers != mState.speakers || next.engineKnown != mState.engineKnown ||
+        next.engineRunning != mState.engineRunning) {
+        next.generation = mState.generation + 1;
+        mState = next;
+        mPending = true;
+        signalWorkAvailable();
+    }
+    IOLockUnlock(mMailboxLock);
+    if (engine)
+        engine->release();
+}
+
+AudioEventState CirrusAudioEventSource::snapshot() {
+    IOLockLock(mMailboxLock);
+    auto state = mState;
+    IOLockUnlock(mMailboxLock);
+    return state;
+}
+
+bool CirrusAudioEventSource::unchanged(uint32_t generation) { return snapshot().generation == generation; }
+
+bool CirrusAudioEventSource::checkForWork() {
+    IOLockLock(mMailboxLock);
+    bool pending = mPending && mAttached;
+    auto state = mState;
+    mPending = false;
+    IOLockUnlock(mMailboxLock);
+    if (pending && mHandler)
+        mHandler(owner, state);
+    return false;
+}
+
+void CirrusAudioEventSource::free() {
+    if (mAttached)
+        detach();
+    OSSafeReleaseNULL(mEngine);
+    OSSafeReleaseNULL(mController);
+    if (mMailboxLock)
+        IOLockFree(mMailboxLock);
+    IOEventSource::free();
+}

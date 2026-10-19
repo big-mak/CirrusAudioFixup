@@ -1,3 +1,7 @@
+// WMFW container constants and parsed-region types.
+// Container addresses and device register addresses use different layouts.
+// Convert them through the mapper before constructing an upload.
+// See LICENSE for distribution terms.
 #pragma once
 
 #include <stddef.h>

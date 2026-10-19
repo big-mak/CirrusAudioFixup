@@ -1,5 +1,10 @@
+// WMFW and coefficient parsing, memory mapping and control lookup.
+// Validate bounds before reading a field. Parsed views borrow their input
+// buffer; keep that buffer alive until upload and control lookup complete.
+// See LICENSE for distribution terms.
 #pragma once
 
+#include "Firmware/WMFW/WMFWFormat.hpp"
 #include <IOKit/IOLib.h>
 
 #define WMFW_MAGIC_0 'W'
@@ -19,62 +24,8 @@
 #define WMFW_ADSP2_XM 0x05
 #define WMFW_ADSP2_YM 0x06
 
-#pragma pack(push, 1)
-
-struct wmfw_header {
-    char magic[4];
-    uint32_t len;
-    uint16_t rev;
-    uint8_t core;
-    uint8_t ver;
-};
-
-struct wmfw_adsp2_sizes {
-    uint32_t xm;
-    uint32_t ym;
-    uint32_t pm;
-    uint32_t zm;
-};
-
-struct wmfw_footer {
-    uint64_t timestamp;
-    uint32_t checksum;
-};
-
-struct wmfw_region {
-    uint32_t type_offset_le;
-    uint32_t len;
-    uint8_t data[];
-};
-
-#pragma pack(pop)
-
 #define MAX_FIRMWARE_REGIONS 32
 #define MAX_MAPPED_REGIONS 192
-
-enum class RegionType : uint32_t {
-    PmPacked = 0x10,
-    XmPacked = 0x11,
-    YmPacked = 0x12,
-    XmUnpacked = 0x5,
-    YmUnpacked = 0x6,
-    AlgorithmData = 0xF2,
-    Metadata = 0xFC,
-    NameText = 0xFE,
-    InfoText = 0xFF,
-    Unknown = 0xFFFF,
-
-    PM_PACKED = PmPacked,
-    XM_PACKED = XmPacked,
-    YM_PACKED = YmPacked,
-    XM_UNPACKED = XmUnpacked,
-    YM_UNPACKED = YmUnpacked,
-    ALGORITHM_DATA = AlgorithmData,
-    METADATA = Metadata,
-    NAME_TEXT = NameText,
-    INFO_TEXT = InfoText,
-    UNKNOWN = Unknown,
-};
 
 enum class MappingStatus {
     Ok = 0,
@@ -276,7 +227,7 @@ inline HaloMemoryPointer decodePointer(uint32_t value) {
     return {static_cast<uint8_t>(value >> 16), static_cast<uint16_t>(value & 0xFFFF)};
 }
 
-class CirrusFirmwareMapper {
+class WMFWMemoryMapper {
 public:
     static MappingStatus mapPackedAddress(RegionType type, uint32_t wordOffset, uint32_t byteOffset, uint32_t& regAddress) {
         uint64_t base = 0, stride = 0;
@@ -439,7 +390,7 @@ public:
     }
 };
 
-class CirrusFirmwareParser {
+class WMFWParser {
 public:
     static uint32_t calculateCrc32(const uint8_t* data, size_t length) {
         uint32_t crc = 0xFFFFFFFF;
@@ -483,7 +434,7 @@ public:
 
     static uint32_t regionToReg(uint16_t type, uint32_t dspWord) {
         uint32_t reg = 0;
-        return CirrusFirmwareMapper::mapPackedAddress(static_cast<RegionType>(type), dspWord, 0, reg) == MappingStatus::OK ? reg : 0;
+        return WMFWMemoryMapper::mapPackedAddress(static_cast<RegionType>(type), dspWord, 0, reg) == MappingStatus::OK ? reg : 0;
     }
 
     static bool resolveControl(const FirmwareImage& fw, const WMFWControlRef& ref, uint32_t& reg) {
@@ -512,8 +463,7 @@ public:
             }
             if (base > 0xFFFFFFFFu - ctl.offset)
                 return false;
-            return CirrusFirmwareMapper::mapPackedAddress(static_cast<RegionType>(ctl.type), base + ctl.offset, 0, reg) ==
-                   MappingStatus::OK;
+            return WMFWMemoryMapper::mapPackedAddress(static_cast<RegionType>(ctl.type), base + ctl.offset, 0, reg) == MappingStatus::OK;
         }
         return false;
     }

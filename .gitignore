@@ -11,11 +11,16 @@ desktop.ini
 __pycache__/
 *.pyc
 .vscode/
-.clang-format
 .editorconfig
 /MacKernelSDK
+/Lilu
 .clangd
 /compile_commands.json
 .cache/
 *.log
 /*.txt
+
+# Locally packaged releases and diagnostic evidence
+/CirrusAudioFixup-*.zip
+/dist/
+/SHA256SUMS

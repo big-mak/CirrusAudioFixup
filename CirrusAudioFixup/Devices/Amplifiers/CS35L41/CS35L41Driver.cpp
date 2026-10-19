@@ -364,7 +364,8 @@ bool CS35L41Driver::applyCalibration(AmplifierState& amp, const FirmwareImage* i
         return false;
     }
 
-    uint8_t ampIdx = (amp.channel == cirrus::core::AudioChannel::Right) ? 1 : 0;
+    uint8_t ampIdx = (amp.channel == cirrus::core::AudioChannel::Right ||
+                      amp.address == cirrus::devices::amplifiers::cs35l41::registers::kI2cAddressRight) ? 1 : 0;
     bool foundData = false;
     bool invalidData = false;
     bool uidReadFailed = false;

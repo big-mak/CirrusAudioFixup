@@ -78,10 +78,12 @@ struct WMFWParser {
     static bool resolveControl(const FirmwareImage&,WMFWControlRef& r,uint32_t& address) { address=r.address; return true; }
 };
 bool WMFWParser::missing=false;
+namespace cirrus::core { enum class AudioChannel : uint8_t { Left = 0, Right = 1 }; }
 struct CS35L41Amp {
     uint8_t address=0x40; const char* name="L";
     void* registerIO=nullptr; uint8_t endpointIndex=0;
     bool firmwareValidated=false,playbackFaulted=false;
+    cirrus::core::AudioChannel channel=cirrus::core::AudioChannel::Left;
 };
 using AmplifierState = CS35L41Amp;
 namespace cirrus::devices::amplifiers::cs35l41::registers { constexpr uint8_t kI2cAddressRight = 0x41; }

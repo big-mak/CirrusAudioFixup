@@ -17,10 +17,7 @@ if sys.platform == 'win32':
     if git_bash.exists():
         bash = str(git_bash)
 assert bash, 'bash is required for the release gate fixture'
-# Apple's -verify_arch consumes every remaining argument as an architecture.
-# The input path must precede that operation, including paths containing spaces.
 workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
-# Branch names may contain several slashes; '*' alone would omit those pushes.
 triggers = workflow.split("\njobs:", 1)[0]
 assert re.search(r"  push:\n    branches: \['\*\*'\]\n    tags: \['v\*'\]", triggers)
 assert re.search(r"  pull_request:\n  workflow_dispatch:", triggers)
@@ -29,14 +26,12 @@ assert 'needs: [build, windows-collector]' in release_job
 for name in ("Package kext bundles", "Upload Release artifact", "Upload Debug artifact", "Upload matching debug symbols"):
     step = build_job.split("      - name: " + name + "\n", 1)[1].split("\n      - name:", 1)[0]
     assert not re.search(r"^        if:", step, re.M), name + " must run after successful builds on every branch"
-assert "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')" in release_job
+assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in release_job
 assert 'fetch-depth: 0' in release_job
-gate = release_job.split('      - name: Verify release commit belongs to main\n', 1)[1].split('\n      - name:', 1)[0]
+gate = release_job.split('      - name: Check if tag already exists\n', 1)[1].split('\n      - name:', 1)[0]
 gate = textwrap.dedent(gate.split('run: |\n', 1)[1])
-assert release_job.index('Verify release commit belongs to main') < release_job.index('Publish a new version')
-# Execute the actual release gate against real main/feature histories, without
-# network access or publication credentials. An ancestor tag remains valid.
-with tempfile.TemporaryDirectory(prefix='cirrus-release-branch-') as directory:
+assert release_job.index('Check if tag already exists') < release_job.index('Publish a new version')
+with tempfile.TemporaryDirectory(prefix='cirrus-release-tag-') as directory:
     tmp = Path(directory)
     repo, origin, checkout = (tmp / name for name in ('source', 'origin.git', 'checkout'))
     def git(*args, cwd=None):
@@ -45,18 +40,18 @@ with tempfile.TemporaryDirectory(prefix='cirrus-release-branch-') as directory:
     git('config', 'user.name', 'Fixture', cwd=repo)
     git('config', 'user.email', 'fixture@example.invalid', cwd=repo)
     git('commit', '--allow-empty', '-m', 'initial', cwd=repo)
-    ancestor = git('rev-parse', 'HEAD', cwd=repo)
-    git('commit', '--allow-empty', '-m', 'main change', cwd=repo)
-    main = git('rev-parse', 'HEAD', cwd=repo)
-    git('checkout', '-b', 'feat/unmerged', cwd=repo)
-    git('commit', '--allow-empty', '-m', 'feature change', cwd=repo)
-    feature = git('rev-parse', 'HEAD', cwd=repo)
+    git('tag', 'v1.0.0', cwd=repo)
     git('clone', '--bare', str(repo), str(origin))
     git('clone', '-b', 'main', str(origin), str(checkout))
-    for commit, allowed in ((main, True), (ancestor, True), (feature, False), ('f' * 40, False)):
-        result = subprocess.run([bash, '-eu', '-c', gate], cwd=checkout,
-                                env={**os.environ, 'GITHUB_SHA': commit}, capture_output=True, text=True)
-        assert (result.returncode == 0) == allowed, result.stdout + result.stderr
+    output_file = checkout / 'output.txt'
+    for tag_name, should_skip in (('v1.0.0', True), ('v2.0.0', False)):
+        script = gate.replace('${{ steps.changelog.outputs.tag }}', tag_name)
+        output_file.unlink(missing_ok=True)
+        result = subprocess.run([bash, '-eu', '-c', script], cwd=checkout,
+                                env={**os.environ, 'GITHUB_OUTPUT': str(output_file)}, capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        output_content = output_file.read_text(encoding='utf-8')
+        assert ('skip=true' in output_content) == should_skip
 assert "xcodebuild -version |" not in workflow, "Do not close Xcode's stdout before it finishes"
 lipo_commands = [shlex.split(line.strip()) for line in workflow.splitlines()
                  if line.strip().startswith("lipo ")]
@@ -86,4 +81,4 @@ for text, plist, tag in [
 subprocess.run([sys.executable, str(ROOT / "Tools/Build/release_metadata.py")], check=True)
 print("PASS tag/version mismatch and pending release rejection")
 print("PASS CI lipo verification argument order")
-print("PASS all-branch CI/artifacts, main-only release tag ancestry and complete Xcode version output")
+print("PASS all-branch CI/artifacts, main automated release and complete Xcode version output")

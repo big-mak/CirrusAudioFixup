@@ -2,8 +2,8 @@ name: CI & CD
 
 on:
   push:
-    branches: ["**"]
-    tags: ["v*"]
+    branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -156,39 +156,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify release commit belongs to main
+      - name: Validate release identity
+        id: changelog
+        run: python3 Tools/Build/release_metadata.py --output-dir dist
+
+      - name: Check if tag already exists
+        id: check_tag
         run: |
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
-            echo "::error::Release tags must point to a commit in main history."
-            exit 1
+          TAG="${{ steps.changelog.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Version ${TAG} is already released. Skipping release publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download Release artifact
+        if: steps.check_tag.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: CirrusAudioFixup-RELEASE-${{ github.sha }}
           path: dist
 
       - name: Download Debug artifact
+        if: steps.check_tag.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: CirrusAudioFixup-DEBUG-${{ github.sha }}
           path: dist
 
-      - name: Validate release identity
-        id: changelog
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 Tools/Build/release_metadata.py --tag "$RELEASE_TAG" --output-dir dist
-
       - name: Download matching debug symbols
+        if: steps.check_tag.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: CirrusAudioFixup-SYMBOLS-${{ github.sha }}
           path: dist
 
       - name: Prepare versioned release assets
+        if: steps.check_tag.outputs.skip != 'true'
         run: |
           VERSION="${{ steps.changelog.outputs.version }}"
           cp dist/CirrusAudioFixup-RELEASE.zip "CirrusAudioFixup-${VERSION}-RELEASE.zip"
@@ -199,12 +204,13 @@ jobs:
           cat dist/RELEASE_NOTES.md
 
       - name: Publish a new version (never overwrite an existing release)
+        if: steps.check_tag.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.changelog.outputs.tag }}
           RELEASE_VERSION: ${{ steps.changelog.outputs.version }}
         run: |
-          gh release create "$RELEASE_TAG" --verify-tag \
+          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
             --title "CirrusAudioFixup $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md \
             "CirrusAudioFixup-${RELEASE_VERSION}-RELEASE.zip" \
             "CirrusAudioFixup-${RELEASE_VERSION}-DEBUG.zip" \

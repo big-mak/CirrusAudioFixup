@@ -1,6 +1,32 @@
 # Changelog
 
-## [1.1.0] - Unreleased
+## [1.1.1] - 2026-10-21
+
+[Pull request #9](https://github.com/hoaug-tran/CirrusAudioFixup/pull/9)
+
+### Added
+
+- Added CS35L41 support for ASUS subsystem `1043:1C9F`, including firmware and left/right speaker tuning.
+- Added automatic board configuration using ACPI resources and built-in metadata, without requiring a custom SSDT.
+- Added GPIO-based speaker ID detection and validation.
+- Improved diagnostic logs for amplifier initialization, firmware loading and SPI errors.
+
+### Fixed
+
+- Fixed Intel SPI power management, including PCI D3hot handling and delayed power requests.
+- Improved SPI controller initialization, chip-select handling and transfer error detection.
+- Fixed playback handling when the HDA stream changes or uses an unsupported format.
+- Improved amplifier startup, mute, shutdown and wake handling.
+
+### Changed
+
+- Reorganized the driver into separate service, platform, transport and amplifier modules.
+- Moved embedded firmware data into a single compilation unit.
+- Updated build tools, diagnostics and regression tests.
+
+## [1.1.0] - 2026-10-19
+
+Released in [#7](https://github.com/hoaug-tran/CirrusAudioFixup/pull/7), including native SPI support from [#6](https://github.com/hoaug-tran/CirrusAudioFixup/pull/6).
 
 ### Added
 
@@ -73,6 +99,8 @@
 - Allow host fixtures to run on Windows while explicitly skipping unavailable sanitizer runtimes; retain sanitizer variants on supported hosts.
 
 ## [1.0.0] - 2026-10-07
+
+Initial driver implementation: [#1](https://github.com/hoaug-tran/CirrusAudioFixup/pull/1).
 
 ### Added
 

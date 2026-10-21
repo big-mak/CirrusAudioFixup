@@ -28,30 +28,23 @@ for name in ("Package kext bundles", "Upload Release artifact", "Upload Debug ar
     assert not re.search(r"^        if:", step, re.M), name + " must run after successful builds on every branch"
 assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in release_job
 assert 'fetch-depth: 0' in release_job
-gate = release_job.split('      - name: Check if tag already exists\n', 1)[1].split('\n      - name:', 1)[0]
+gate = release_job.split('      - name: Check release status\n', 1)[1].split('\n      - name:', 1)[0]
 gate = textwrap.dedent(gate.split('run: |\n', 1)[1])
-assert release_job.index('Check if tag already exists') < release_job.index('Publish a new version')
-with tempfile.TemporaryDirectory(prefix='cirrus-release-tag-') as directory:
+assert release_job.index('Check release status') < release_job.index('Publish a new version')
+with tempfile.TemporaryDirectory(prefix='cirrus-release-gate-') as directory:
     tmp = Path(directory)
-    repo, origin, checkout = (tmp / name for name in ('source', 'origin.git', 'checkout'))
-    def git(*args, cwd=None):
-        return subprocess.check_output(['git', *args], cwd=cwd, stderr=subprocess.STDOUT, text=True).strip()
-    git('init', '-b', 'main', str(repo))
-    git('config', 'user.name', 'Fixture', cwd=repo)
-    git('config', 'user.email', 'fixture@example.invalid', cwd=repo)
-    git('commit', '--allow-empty', '-m', 'initial', cwd=repo)
-    git('tag', 'v1.0.0', cwd=repo)
-    git('clone', '--bare', str(repo), str(origin))
-    git('clone', '-b', 'main', str(origin), str(checkout))
-    output_file = checkout / 'output.txt'
-    for tag_name, should_skip in (('v1.0.0', True), ('v2.0.0', False)):
-        script = gate.replace('${{ steps.changelog.outputs.tag }}', tag_name)
+    output_file = tmp / 'output.txt'
+    mock_gh = 'gh() { if [ "$3" = "v1.0.0" ]; then echo false; elif [ "$3" = "v1.1.1" ]; then echo true; else return 1; fi; }\n'
+    test_env = {**os.environ, 'GITHUB_OUTPUT': str(output_file)}
+    for tag_name, expected_skip, expected_draft in (('v1.0.0', True, None), ('v1.1.1', False, 'true'), ('v2.0.0', False, 'not_found')):
         output_file.unlink(missing_ok=True)
-        result = subprocess.run([bash, '-eu', '-c', script], cwd=checkout,
-                                env={**os.environ, 'GITHUB_OUTPUT': str(output_file)}, capture_output=True, text=True)
+        result = subprocess.run([bash, '-eu', '-c', mock_gh + gate], cwd=tmp,
+                                env={**test_env, 'TAG': tag_name}, capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
-        output_content = output_file.read_text(encoding='utf-8')
-        assert ('skip=true' in output_content) == should_skip
+        content = output_file.read_text(encoding='utf-8')
+        assert ('skip=true' in content) == expected_skip
+        if expected_draft:
+            assert f'is_draft={expected_draft}' in content
 assert "xcodebuild -version |" not in workflow, "Do not close Xcode's stdout before it finishes"
 lipo_commands = [shlex.split(line.strip()) for line in workflow.splitlines()
                  if line.strip().startswith("lipo ")]

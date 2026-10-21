@@ -160,40 +160,44 @@ jobs:
         id: changelog
         run: python3 Tools/Build/release_metadata.py --output-dir dist
 
-      - name: Check if tag already exists
-        id: check_tag
+      - name: Check release status
+        id: release_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.changelog.outputs.tag }}
         run: |
-          TAG="${{ steps.changelog.outputs.tag }}"
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Version ${TAG} is already released. Skipping release publish."
+          STATUS=$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || echo "not_found")
+          if [ "$STATUS" = "false" ]; then
+            echo "Version ${TAG} is already published. Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "is_draft=$STATUS" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download Release artifact
-        if: steps.check_tag.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: CirrusAudioFixup-RELEASE-${{ github.sha }}
           path: dist
 
       - name: Download Debug artifact
-        if: steps.check_tag.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: CirrusAudioFixup-DEBUG-${{ github.sha }}
           path: dist
 
       - name: Download matching debug symbols
-        if: steps.check_tag.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: CirrusAudioFixup-SYMBOLS-${{ github.sha }}
           path: dist
 
       - name: Prepare versioned release assets
-        if: steps.check_tag.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true'
         run: |
           VERSION="${{ steps.changelog.outputs.version }}"
           cp dist/CirrusAudioFixup-RELEASE.zip "CirrusAudioFixup-${VERSION}-RELEASE.zip"
@@ -204,14 +208,23 @@ jobs:
           cat dist/RELEASE_NOTES.md
 
       - name: Publish a new version (never overwrite an existing release)
-        if: steps.check_tag.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.changelog.outputs.tag }}
           RELEASE_VERSION: ${{ steps.changelog.outputs.version }}
+          IS_DRAFT: ${{ steps.release_check.outputs.is_draft }}
         run: |
-          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
-            --title "CirrusAudioFixup $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md \
-            "CirrusAudioFixup-${RELEASE_VERSION}-RELEASE.zip" \
-            "CirrusAudioFixup-${RELEASE_VERSION}-DEBUG.zip" \
-            "CirrusAudioFixup-${RELEASE_VERSION}-SYMBOLS.zip" SHA256SUMS dist/BUILD_METADATA.json
+          if [ "$IS_DRAFT" = "true" ]; then
+            gh release upload "$RELEASE_TAG" --clobber \
+              "CirrusAudioFixup-${RELEASE_VERSION}-RELEASE.zip" \
+              "CirrusAudioFixup-${RELEASE_VERSION}-DEBUG.zip" \
+              "CirrusAudioFixup-${RELEASE_VERSION}-SYMBOLS.zip" SHA256SUMS dist/BUILD_METADATA.json
+            gh release edit "$RELEASE_TAG" --draft=false --latest --title "CirrusAudioFixup $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
+              --title "CirrusAudioFixup $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md \
+              "CirrusAudioFixup-${RELEASE_VERSION}-RELEASE.zip" \
+              "CirrusAudioFixup-${RELEASE_VERSION}-DEBUG.zip" \
+              "CirrusAudioFixup-${RELEASE_VERSION}-SYMBOLS.zip" SHA256SUMS dist/BUILD_METADATA.json
+          fi

@@ -42,6 +42,14 @@ int main() {
     assert(envy->boardConfiguration->permits({0x103C, 0x8A31, "CSC3551"}));
     assert(platform::permitsHardwareInitialization(*envy, 0x103C8A31));
     assert(!platform::permitsHardwareInitialization(*envy, 0x103C89C6));
+    // The ENVY drives its shared amp reset through AMDI0030 GPIO 30, not the
+    // Legion's pin 6; both use pinctrl-amd bits 22 (value) and 23 (output).
+    assert(envy->resetQuirk);
+    assert(std::strcmp(envy->resetQuirk->controllerName, "AMDI0030") == 0);
+    assert(envy->resetQuirk->registerIndex == 30);
+    assert(envy->resetQuirk->assertClearBit == 22);
+    assert(envy->resetQuirk->outputEnableBit == 23);
+    assert(envy->resetQuirk->registerIndex != lenovo->resetQuirk->registerIndex);
     assert(platform::findPlatformProfile("UNKNOWN") == nullptr);
     const auto& unknown = platform::defaultPlatformProfile();
     assert(unknown.resetQuirk == nullptr);

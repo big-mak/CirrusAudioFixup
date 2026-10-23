@@ -75,6 +75,16 @@ static constexpr ResetControllerQuirk kAmdAmdi0030Reset = {
     "AMDI0030", 6, 22, 23, 0x400, 5,
 };
 
+// HP ENVY 15-ey0xxx 103C8A31: the shared CS35L41 reset is GPIO 30 on the same
+// AMDI0030 controller. ACPI declares four GpioIo descriptors on the CSC3551
+// node (pins 0x1E reset + speaker-id, 0x5A speaker-id, 0x1F amp IRQ), and Linux
+// reports pin 30 as output-high once cs35l41-hda probes. Register layout is
+// pinctrl-amd: one DWORD per pin at base + pin*4, bit 22 = output value,
+// bit 23 = output enable, both active-low for assert.
+static constexpr ResetControllerQuirk kAmdAmdi0030EnvyReset = {
+    "AMDI0030", 30, 22, 23, 0x400, 2,
+};
+
 
 // HP ENVY x360 15-ey0xxx (SSID 103C8A31): CS35L41 B2 stereo pair on I2C HID CSC3551.
 // controllerPath "*" matches any live VoodooI2C nub; Attachment accepts the wildcard
@@ -119,7 +129,7 @@ static constexpr PlatformProfile kPlatformProfiles[] = {
      nullptr, 0, &kLegionProtectionIRQ},
     {"lenovo-clsa0101-cs35l41", "CLSA0101", core::AmplifierModel::CS35L41, kCs35l41StereoEndpoints, 2, nullptr, false},
     // Authorized I2C CSC3551 board (ENVY). Selected only when SSID permits; generic CSC3551 stays fail-closed.
-    {"hp-envy-ey0xxx-csc3551", "CSC3551", core::AmplifierModel::CS35L41, nullptr, 0, nullptr, true, &kHPEnvy103C8A31Board, nullptr, 0,
+    {"hp-envy-ey0xxx-csc3551", "CSC3551", core::AmplifierModel::CS35L41, nullptr, 0, &kAmdAmdi0030EnvyReset, true, &kHPEnvy103C8A31Board, nullptr, 0,
      nullptr, nullptr, nullptr, BoardIdentitySource::AudioPCI},
     {"acpi-csc3551-cs35l41", "CSC3551", core::AmplifierModel::CS35L41, nullptr, 0, nullptr, false, nullptr, nullptr, 0, nullptr, nullptr,
      nullptr, BoardIdentitySource::ACPI},

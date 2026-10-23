@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix='cirrus-vtable-policy-') as directory:
         source = root / 'fixture.cpp'
         source.write_text(('namespace audio {\n' + fixture + '\n}') if nested else fixture)
         binary = root / 'fixture.o'
-        subprocess.run(['g++', '-c', str(source), '-o', str(binary)], check=True)
+        subprocess.run(['g++', '-std=c++17', '-c', str(source), '-o', str(binary)], check=True)
         symbols = set(subprocess.check_output(['nm', '-j', str(binary)], text=True).splitlines())
         if sys.platform != 'darwin':
             symbols = {'_' + symbol for symbol in symbols}

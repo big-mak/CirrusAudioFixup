@@ -273,9 +273,12 @@ void CS35L41Driver::logASPSnapshot(AmplifierState& amp) {
                rx2Src, rx3Src, rx4Src, rx5Src);
 
     bool pass = true;
-    uint32_t expectedRxSlot = (strcmp(amp.name, "right") == 0) ? 1 : 0;
+    // Channel, not endpoint name: names are "spiN"/"i2cN" labels, so comparing
+    // them to "right" always took the left branch and reported a false mismatch.
+    const bool isRight = amp.channel == cirrus::core::AudioChannel::Right;
+    uint32_t expectedRxSlot = isRight ? 1 : 0;
     if ((rxSlot & 0x3F) != expectedRxSlot) {
-        CIRRUS_ERR("asp rx slot mismatch on %s", amp.name);
+        CIRRUS_ERR("asp rx slot mismatch on %s: rx_slot=0x%08X expected=%u", amp.name, rxSlot, expectedRxSlot);
         pass = false;
     }
 

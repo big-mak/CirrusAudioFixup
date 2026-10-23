@@ -357,7 +357,7 @@ bool CS35L41Driver::applyASP(AmplifierState& amp) {
 
     uint32_t crcAfter = bootArgEnabled("-cirrusdiag") ? calculateRegistersCRC32(amp) : 0;
 
-    if (strcmp(amp.name, "right") == 0) {
+    if (amp.channel == cirrus::core::AudioChannel::Right) {
         setProperty("Cirrus_ASP_CRC_right", crcAfter, 32);
         setProperty("Cirrus_ASP_TimeUS_right", elapsedUs, 32);
     } else {
@@ -386,7 +386,7 @@ bool CS35L41Driver::applyGPIO(AmplifierState& amp) {
 
     uint32_t crcAfter = bootArgEnabled("-cirrusdiag") ? calculateRegistersCRC32(amp) : 0;
 
-    if (strcmp(amp.name, "right") == 0) {
+    if (amp.channel == cirrus::core::AudioChannel::Right) {
         setProperty("Cirrus_GPIO_CRC_right", crcAfter, 32);
         setProperty("Cirrus_GPIO_TimeUS_right", elapsedUs, 32);
     } else {

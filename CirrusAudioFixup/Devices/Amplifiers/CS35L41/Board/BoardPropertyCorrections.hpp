@@ -10,6 +10,8 @@ struct PropertyCorrection {
 };
 inline constexpr PropertyCorrection kPropertyCorrections[] = {
     {0x103c89c6, {BoostTopology::Internal, 1000, 4500, 24}},
+    // HP ENVY x360 15-ey0xxx (Linux cs35l41_config_table 103C8A31): internal boost 1000/4100/24.
+    {0x103c8a31, {BoostTopology::Internal, 1000, 4100, 24}},
 };
 inline const PropertyCorrection* propertyCorrection(uint16_t vendor, uint16_t device) {
     const uint32_t identity = uint32_t(vendor) << 16 | device;

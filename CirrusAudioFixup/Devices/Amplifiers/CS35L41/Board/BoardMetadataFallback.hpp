@@ -9,11 +9,16 @@ namespace cirrus::devices::amplifiers::cs35l41 {
 inline bool prepareBoardMetadata(const platform::BoardIdentity& identity, IOACPIPlatformDevice* amplifier, IOService* owner) {
     struct Facts {
         uint32_t subsystem;
+        bool i2cBoard;  // true: I2C (no SPI CS / no SPI _CRS requirement)
         uint16_t csResource, resetResource, speakerResource;
         uint32_t inductor, peak, capacitor;
     };
-    // ASUS G614JI: Linux v6.12 electrical values and the board's stock _CRS order.
-    static constexpr Facts boards[] = {{0x10431c9f, 0, 1, 2, 1000, 4500, 24}};
+    // ASUS G614JI: Linux v6.12 electrical values and the board's stock _CRS order (SPI).
+    // HP ENVY 15-ey0xxx 103C8A31: Linux cs35l41_config_table (I2C, INTERNAL, reset=0, spkid=1, no CS).
+    static constexpr Facts boards[] = {
+        {0x10431c9f, false, 0, 1, 2, 1000, 4500, 24},
+        {0x103C8A31, true, 0, 0, 1, 1000, 4100, 24},
+    };
     const Facts* facts = nullptr;
     if (!identity.acpiHid || strcmp(identity.acpiHid, "CSC3551"))
         return true;
@@ -24,6 +29,41 @@ inline bool prepareBoardMetadata(const platform::BoardIdentity& identity, IOACPI
         return true;
     if (!amplifier || !owner)
         return false;
+
+    if (facts->i2cBoard) {
+        // I2C boards: inject cirrus,* arrays and GPIO refs from the Linux quirk table.
+        // Do not require SPI _CRS parsing (would reject NoSPI).
+        bool hasI2C = false;
+        OSObject* object = nullptr;
+        const auto result = amplifier->evaluateObject("_CRS", &object);
+        auto* bytes = OSDynamicCast(OSData, object);
+        transport::ACPISPIResources resources{};
+        const auto kind =
+            result == kIOReturnSuccess && bytes
+                ? transport::parseACPISPIResources(static_cast<const uint8_t*>(bytes->getBytesNoCopy()), bytes->getLength(), resources,
+                                                   &hasI2C)
+                : transport::ACPISPIResult::Malformed;
+        OSSafeReleaseNULL(object);
+        if (kind != transport::ACPISPIResult::NoSPI || !hasI2C)
+            return false;
+        support::ACPIBoardMetadata metadata;
+        auto* amp = metadata.node(amplifier);
+        const uint32_t indices[]{0, 1}, zero[]{0, 0}, two[]{2, 2};
+        const uint32_t inductor[]{facts->inductor, facts->inductor}, peak[]{facts->peak, facts->peak};
+        const uint32_t capacitor[]{facts->capacitor, facts->capacitor};
+        const bool ok =
+            amp && metadata.references(amp, "reset-gpios", amplifier, facts->resetResource, 0, false, 2) &&
+            metadata.references(amp, "speaker-id-gpios", amplifier, facts->speakerResource, 0, false, 2) &&
+            metadata.array(amp, "cirrus,dev-index", indices, 2) && metadata.array(amp, "cirrus,speaker-position", indices, 2) &&
+            metadata.array(amp, "cirrus,boost-type", zero, 2) && metadata.array(amp, "cirrus,gpio1-func", zero, 2) &&
+            metadata.array(amp, "cirrus,gpio2-func", two, 2) && metadata.array(amp, "cirrus,boost-ind-nanohenry", inductor, 2) &&
+            metadata.array(amp, "cirrus,boost-peak-milliamp", peak, 2) &&
+            metadata.array(amp, "cirrus,boost-cap-microfarad", capacitor, 2) && metadata.publish(owner);
+        if (ok)
+            owner->setProperty("Cirrus_Board_Metadata_Source", "CS35L41_VERIFIED_BOARD_TABLE");
+        return ok;
+    }
+
     OSObject* object = nullptr;
     const auto result = amplifier->evaluateObject("_CRS", &object);
     auto* bytes = OSDynamicCast(OSData, object);

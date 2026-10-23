@@ -88,6 +88,23 @@
             <key>IOProbeScore</key>
             <integer>10000</integer>
         </dict>
+        <!-- HP ENVY x360 15-ey0xxx: CSC3551 over I2C (requires custom VoodooI2C main). -->
+        <key>CirrusAudioFixupI2C_CSC3551</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.hoaugtr.CirrusAudioFixup</string>
+            <key>IOClass</key>
+            <string>CirrusAudioFixup</string>
+            <key>IOProviderClass</key>
+            <string>VoodooI2CDeviceNub</string>
+            <key>IOPropertyMatch</key>
+            <dict>
+                <key>IOName</key>
+                <string>CSC3551</string>
+            </dict>
+            <key>IOProbeScore</key>
+            <integer>10000</integer>
+        </dict>
     </dict>
 </dict>
 </plist>

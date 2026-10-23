@@ -119,6 +119,23 @@ int main(){
   IOService unknown;assert(prepareBoardMetadata({0x1043,0x14d3,"CSC3551"},&amp,&unknown));
   assert(!unknown.getProperty("Cirrus_Board_Metadata"));
  }
+ // HP ENVY 103C8A31: I2C-only _CRS must inject verified properties without SPI parsing.
+ {
+  IOACPIPlatformDevice amp;IOService owner;
+  amp.path="IOACPIPlane:/_SB/I2CB/SPKR";
+  ::devices={&amp};
+  // Minimal valid I2C SerialBus _CRS (same framing as check_acpi_spi).
+  std::vector<uint8_t> i2c(22,0);i2c[0]=0x8e;i2c[1]=19;i2c[3]=1;i2c[5]=1;i2c[6]=2;i2c[9]=1;i2c[10]=6;i2c[16]=0x40;i2c[18]='I';i2c[19]='2';i2c[20]='C';
+  i2c.push_back(0x79);i2c.push_back(0);
+  amp.values["_CRS"]=make<OSData>(i2c);
+  amp.dsdValidation=kIOReturnError;amp.absentValidation=kIOReturnError;
+  const platform::BoardIdentity envy{0x103C,0x8A31,"CSC3551"};
+  assert(prepareBoardMetadata(envy,&amp,&owner));
+  assert(owner.strings["Cirrus_Board_Metadata_Source"]=="CS35L41_VERIFIED_BOARD_TABLE");
+  assert(owner.getProperty("Cirrus_Board_Metadata"));
+  // SPI-only ASUS path must still reject I2C-only CRS.
+  IOService asusOwner;assert(!prepareBoardMetadata({0x1043,0x1c9f,"CSC3551"},&amp,&asusOwner));
+ }
 }
 ''')
     for flags in sanitizer_flags():

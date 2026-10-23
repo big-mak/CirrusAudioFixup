@@ -79,6 +79,9 @@ void profileChecks(){
  for(auto bad:{"", "103C89C", "0x103C89C6", "103G89C6", "000089C6", "FFFFFFFF"})
   assert(!platform::parseACPISubsystemId(bad,identity)&&identity==0x103c89c6);
  assert(!platform::findPlatformProfile("CSC3551",identity)->allowAutomaticInitialization);
+ assert(platform::findPlatformProfile("CSC3551",0x103C8A31)->allowAutomaticInitialization);
+ assert(platform::findPlatformProfile("CSC3551",0x103C8A31)->boardConfiguration);
+ assert(selectFirmwareResource(cs35l41Firmware,cs35l41FirmwareCount,0x103c,0x8a31,1));
  Properties properties;auto* discovered=resolve(properties);assert(discovered);
  const auto& board=discovered->configuration;assert(board.permits({0x103c,0x89c6,"CSC3551"}));
  assert(board.count==2&&board.useBoardFirmwareIdentity);

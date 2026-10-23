@@ -8,6 +8,7 @@
 #include "Core/AudioTypes.hpp"
 #include "Firmware/FirmwareBundle.hpp"
 #include "Platform/Board/BoardConfiguration.hpp"
+#include "Devices/Amplifiers/CS35L41/DeviceConfiguration.hpp"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -74,10 +75,52 @@ static constexpr ResetControllerQuirk kAmdAmdi0030Reset = {
     "AMDI0030", 6, 22, 23, 0x400, 5,
 };
 
+
+// HP ENVY x360 15-ey0xxx (SSID 103C8A31): CS35L41 B2 stereo pair on I2C HID CSC3551.
+// controllerPath "*" matches any live VoodooI2C nub; Attachment accepts the wildcard
+// when probing/binding. speakerId=1 matches Linux SPKID and firmware spkid1 blobs.
+// DeviceConfiguration mirrors Linux cs35l41_config_table (INTERNAL, 1000/4100/24).
+inline constexpr cirrus::devices::amplifiers::cs35l41::DeviceConfiguration kHPEnvy103C8A31DeviceConfig{
+    {cirrus::devices::amplifiers::cs35l41::BoostTopology::Internal, 1000, 4100, 24}, 0, 2};
+inline constexpr AmplifierBinding kHPEnvy103C8A31Bindings[] = {
+    {{core::BusTransportType::I2C, "*", 0x40},
+     0x00035A40,
+     0,
+     1,
+     "speaker-protection",
+     "CSC3551",
+     0,
+     &kHPEnvy103C8A31DeviceConfig,
+     sizeof(kHPEnvy103C8A31DeviceConfig),
+     cirrus::devices::amplifiers::cs35l41::kDeviceConfigurationKind},
+    {{core::BusTransportType::I2C, "*", 0x41},
+     0x00035A40,
+     1,
+     1,
+     "speaker-protection",
+     "CSC3551",
+     0,
+     &kHPEnvy103C8A31DeviceConfig,
+     sizeof(kHPEnvy103C8A31DeviceConfig),
+     cirrus::devices::amplifiers::cs35l41::kDeviceConfigurationKind},
+};
+inline constexpr BoardConfiguration kHPEnvy103C8A31Board{
+    {0x103C, 0x8A31, "CSC3551"},
+    kHPEnvy103C8A31Bindings,
+    2,
+    true,
+    true,
+    true,
+    true,
+};
+
 static constexpr PlatformProfile kPlatformProfiles[] = {
     {"lenovo-clsa0100-cs35l41", "CLSA0100", core::AmplifierModel::CS35L41, kCs35l41StereoEndpoints, 2, &kAmdAmdi0030Reset, true, nullptr,
      nullptr, 0, &kLegionProtectionIRQ},
     {"lenovo-clsa0101-cs35l41", "CLSA0101", core::AmplifierModel::CS35L41, kCs35l41StereoEndpoints, 2, nullptr, false},
+    // Authorized I2C CSC3551 board (ENVY). Selected only when SSID permits; generic CSC3551 stays fail-closed.
+    {"hp-envy-ey0xxx-csc3551", "CSC3551", core::AmplifierModel::CS35L41, nullptr, 0, nullptr, true, &kHPEnvy103C8A31Board, nullptr, 0,
+     nullptr, nullptr, nullptr, BoardIdentitySource::AudioPCI},
     {"acpi-csc3551-cs35l41", "CSC3551", core::AmplifierModel::CS35L41, nullptr, 0, nullptr, false, nullptr, nullptr, 0, nullptr, nullptr,
      nullptr, BoardIdentitySource::ACPI},
 };

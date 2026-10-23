@@ -43,9 +43,30 @@ bool CirrusAudioFixup::bindAmplifierDrivers() {
         if (!mI2CController)
             return false;
     }
-    if (mPlatformProfile->boardConfiguration)
+    if (mPlatformProfile->boardConfiguration) {
         mRuntimeBoard = *mPlatformProfile->boardConfiguration;
-    else {
+        // Rewrite compile-time "*" I2C controller paths to the live provider path so
+        // endpoint matching and RegisterBus construction stay consistent.
+        if (mRuntimeBoard.amplifiers && mRuntimeBoard.count && mRuntimeBoard.count <= kMaxAmplifiers) {
+            bool needsRewrite = false;
+            for (size_t i = 0; i < mRuntimeBoard.count; ++i) {
+                const auto& ep = mRuntimeBoard.amplifiers[i].endpoint;
+                if (ep.transport == cirrus::core::BusTransportType::I2C && ep.controllerPath && !strcmp(ep.controllerPath, "*")) {
+                    needsRewrite = true;
+                    break;
+                }
+            }
+            if (needsRewrite) {
+                for (size_t i = 0; i < mRuntimeBoard.count; ++i) {
+                    mRuntimeBindings[i] = mRuntimeBoard.amplifiers[i];
+                    if (mRuntimeBindings[i].endpoint.transport == cirrus::core::BusTransportType::I2C &&
+                        mRuntimeBindings[i].endpoint.controllerPath && !strcmp(mRuntimeBindings[i].endpoint.controllerPath, "*"))
+                        mRuntimeBindings[i].endpoint.controllerPath = mRuntimeControllerPath;
+                }
+                mRuntimeBoard.amplifiers = mRuntimeBindings;
+            }
+        }
+    } else {
         int length = sizeof(mRuntimeControllerPath);
         if (!mProvider->getPath(mRuntimeControllerPath, &length, gIOServicePlane)) {
             releaseAmplifierDrivers();
@@ -825,8 +846,10 @@ size_t CirrusAudioFixup::detectConfiguredI2CAmplifiers() {
     for (size_t i = 0; i < board.count && mAmplifierCount < kMaxAmplifiers; ++i) {
         const auto& binding = board.amplifiers[i];
         const auto& endpoint = binding.endpoint;
-        if (!endpoint.valid() || endpoint.transport != cirrus::core::BusTransportType::I2C || endpoint.tenBitAddress ||
-            strcmp(endpoint.controllerPath, mRuntimeControllerPath)) {
+        // "*" is a verified-board wildcard: the live VoodooI2C nub path is unknown at
+        // compile time (Legion-style endpoints avoid this by skipping boardConfiguration).
+        const bool pathMatch = !strcmp(endpoint.controllerPath, "*") || !strcmp(endpoint.controllerPath, mRuntimeControllerPath);
+        if (!endpoint.valid() || endpoint.transport != cirrus::core::BusTransportType::I2C || endpoint.tenBitAddress || !pathMatch) {
             recordAttachmentFailure("RESOURCE", "I2C_ENDPOINT_UNMATCHED", kIOReturnUnsupported, uint32_t(i));
             CIRRUS_ERR("I2C endpoint unsupported/unmatched: index=%lu controller=%s address=0x%X tenBit=%u bus=%u", i,
                        endpoint.controllerPath, unsigned(endpoint.i2cAddress), unsigned(endpoint.tenBitAddress),
@@ -870,7 +893,9 @@ size_t CirrusAudioFixup::detectConfiguredI2CAmplifiers() {
         amp = {};
         snprintf(amp.endpointLabel, sizeof(amp.endpointLabel), "i2c%u", unsigned(i));
         amp.name = amp.endpointLabel;
+        // Bind against the live controller path; board tables may use "*".
         amp.endpoint = endpoint;
+        amp.endpoint.controllerPath = mRuntimeControllerPath;
         amp.address = uint8_t(endpoint.i2cAddress);
         amp.endpointIndex = uint8_t(mAmplifierCount);
         amp.channel = static_cast<cirrus::core::AudioChannel>(binding.channelIndex);

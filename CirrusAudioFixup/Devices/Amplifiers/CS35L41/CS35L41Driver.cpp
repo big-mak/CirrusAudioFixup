@@ -1,4 +1,5 @@
 #include "Devices/Amplifiers/CS35L41/CS35L41Internal.hpp"
+#include "Devices/Amplifiers/CS35L41/Board/BoardPropertyCorrections.hpp"
 
 namespace cirrus::devices::amplifiers::cs35l41 {
 IOReturn CS35L41Driver::initializeHardware() {
@@ -222,6 +223,17 @@ CS35L41Driver::CS35L41Driver(const platform::AmplifierDriverContext& context)
         amp.gpio2Function = configuration.gpio2Function;
         amp.explicitGPIOConfiguration =
             binding.driverConfigurationKind && !strcmp(binding.driverConfigurationKind, kDeviceConfigurationKind);
+        // Legacy empty power (Legion external) may still need a verified SSID correction
+        // for internal-boost boards that attach without ACPI discovery (I2C allowlist).
+        if (!amp.explicitGPIOConfiguration) {
+            if (const auto* correction =
+                    propertyCorrection(context.actualBoard.subsystemVendor, context.actualBoard.subsystemDevice)) {
+                amp.power = correction->power;
+                amp.gpio1Function = 0;
+                amp.gpio2Function = 2;
+                amp.explicitGPIOConfiguration = true;
+            }
+        }
     }
     amp.deviceId = context.board.amplifiers[context.bindingIndex].siliconId;
     amp.firmwareSubsystemId = context.board.useBoardFirmwareIdentity

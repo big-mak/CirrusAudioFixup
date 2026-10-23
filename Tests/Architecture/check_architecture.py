@@ -35,6 +35,13 @@ int main() {
     assert(generic);
     assert(generic->resetQuirk == nullptr);
     assert(!generic->allowAutomaticInitialization);
+    // ZBook SPI SSID must not select the ENVY I2C allowlist profile.
+    assert(!platform::findPlatformProfile("CSC3551", 0x103C89C6)->allowAutomaticInitialization);
+    const auto* envy = platform::findPlatformProfile("CSC3551", 0x103C8A31);
+    assert(envy && envy->allowAutomaticInitialization && envy->boardConfiguration);
+    assert(envy->boardConfiguration->permits({0x103C, 0x8A31, "CSC3551"}));
+    assert(platform::permitsHardwareInitialization(*envy, 0x103C8A31));
+    assert(!platform::permitsHardwareInitialization(*envy, 0x103C89C6));
     assert(platform::findPlatformProfile("UNKNOWN") == nullptr);
     const auto& unknown = platform::defaultPlatformProfile();
     assert(unknown.resetQuirk == nullptr);

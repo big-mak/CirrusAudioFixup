@@ -79,7 +79,7 @@ this repository. `IRQ1_RAW_STATUS3` shows `PLL_UNLOCK` set and `PLL_LOCK` clear.
 
 ## Root cause
 
-The amplifiers are configured as I2S **clock consumers**:
+The amplifiers are I2S **clock consumers**:
 
 ```
 CS35L41_SP_FORMAT   (0x00004808) = 0x20200200   // 32-bit slots, I2S, clk consumer
@@ -87,93 +87,72 @@ CS35L41_SP_RATE_CTRL(0x00004804) = 0x00000021   // ASP_BCLK = 3.072 MHz
 CS35L41_PLL_CLK_CTRL(0x00002C04) = 0x00000430   // BCLK input, PLL_REFCLK_EN
 ```
 
-The PLL can only lock while the codec drives BCLK down the ASP. Nothing on
-macOS does. `PUP_DONE` is a consequence, not the fault: with no bit clock the
-power-up sequence cannot complete, and the observed bit 22 is not an error flag.
+so they cannot start until the codec drives BCLK down the ASP. That part of the
+diagnosis held: with no bit clock the PLL never locks, `PUP_DONE` never sets, and
+playback fails with `POWER_UP_TIMEOUT` even though firmware, calibration and DSP
+boot are all healthy.
 
-Linux does not hit this because the Realtek HDA driver registers the amplifiers
-as HDA components and the codec drives the stream:
+What was wrong was the conclusion drawn from it. The codec route, not the
+amplifier driver, is what supplies the clock, and the ALC245 route in use was the
+wrong one.
 
-```c
-/* sound/pci/hda/patch_realtek.c */
-static void cs35l41_fixup_i2c_two(struct hda_codec *cdc, const struct hda_fixup *fix, int action)
-{
-    cs35l41_generic_fixup(cdc, action, "i2c", "CSC3551", 2);
-}
+### The fix: ALC245 layout 13
 
-static void cs35l41_generic_fixup(struct hda_codec *cdc, int action, const char *bus,
-                                  const char *hid, int count)
-{
-    spec->comps[i].codec = cdc;
-    component_match_add(dev, &spec->match, comp_match_cs35l41_dev_name, rec);
-    ...
-    spec->gen.pcm_playback_hook = comp_generic_playback_hook;
-}
+The machine was booting with `alcid=11`. Layout 11 is documented as
+"ALC235 for Lenovo by soto2080" and drives an analog speaker path; it never
+exercises the codec path that feeds the amplifiers, so the ASP stayed clockless.
+Layout 13 is "lunjielee - Realtek ALC245 for HP Omen 2020" and does drive it.
+
+Changing `alcid=11` to `alcid=13` in the OpenCore boot arguments was the entire
+fix. Internal speakers then played, confirmed by ear. The amplifier driver did
+not need to change:
+
+```
+Cirrus_Amplifier_Status = READY
+Cirrus_Driver_Verdict   = READY_DSP
 ```
 
-AppleALC has no equivalent. A clone of `acidanthera/AppleALC` at `master`
-contains no reference to `CS35L41`, `CSC3551`, or HDA component binding, and
-`Resources/ALC245/` provides layouts 11, 12 and 13 with analog paths only.
+So the earlier statement that macOS has no way to drive the codec bit clock was
+wrong, and so was the claim that this stack never produced audible output.
+Upstream demonstrates working speakers for the Legion 7 in the InsanelyMac
+thread (video posted), and the same mechanism works here once the layout is
+correct.
 
-## Correction to the repository's own documentation
+AppleALC needs no changes. Its ALC245 resources already contain the required
+route in layout 13; no CS35L41-specific support is involved on the codec side.
 
-The claim that this stack produces working internal speakers is not supported by
-the repository history.
+## Open issue: internal microphone
 
-Commit `83f8e06` (`docs: prepare project for public contribution`, 2026-10-06)
-is documentation-only — nine files, no driver sources — and it removed:
+Layout 13 plays audio but publishes no capture device. `system_profiler` lists
+only `Built-in Output`, and there are zero `AppleHDAEngineInput` instances.
 
-> **Project Status: Experimental / Audio Output is NOT Working**
->
-> **At present, this kext DOES NOT play audible sound.** While it successfully
-> communicates with the hardware and initializes the amplifiers, the system
-> remains muted due to DSP firmware locking and clock-sync issues with AppleHDA.
+Layout 11 did publish `Built-in Input` (2 channels), so the codec capture path
+works under a different layout. Layout 13's `PathMaps` do declare
+`Inputs = [Mic, LineIn]` and a path through nodes 8 -> 35 -> 25 with `Boost = 3`,
+so the route is described but not being realised on this codec configuration.
 
-Commit `4d96a85` (`release: CirrusAudioFixup 1.1.1`) added the `Working` rows to
-the supported-laptop table.
+Two competing explanations, not yet separated:
 
-The pre-rewrite README stated that Legion operation required AppleALC
-`layout-id 16` and `Platforms16.xml`. Neither file exists in this repository, and
-stock AppleALC ships ALC287 layouts 11, 13 and 21 only. `CHANGELOG.md` still
-refers to "Realtek ALC287 layout 16". The one supported row with a matching
-artifact is ASUS `1043:1C9F` ("Working with layout 21"), which exists upstream.
+1. The input path described by layout 13 does not match this codec's pin
+   configuration, so AppleHDA builds no input stream.
+2. The internal microphone array on this platform is not on the HDA codec at
+   all. Linux exposes a third card, `acp`
+   (`HP-HPENVYx3602_in_1Laptop15_ey0xxx-Type1ProductConfigId-8A31`), which is
+   the AMD ACP path used for DMIC arrays on some Ryzen laptops. If the mic is
+   there, no AppleALC layout can reach it and a separate ACP/DMIC driver would
+   be needed.
 
-Treat the Legion 7 `17AA:3847` and ZBook Fury `103C:89C6` rows as unverified
-until speaker playback is demonstrated on that hardware.
+The cheapest way to separate them is one Linux boot:
 
-## What is not the problem
+```
+arecord -l
+cat /proc/asound/cards
+```
 
-Ruled out with evidence on this machine:
-
-- I2C transfer path and the custom VoodooI2C fork. `VoodooI2CTransferToAddress`
-  is exported and the transfer returns the correct device ID.
-- Board identity and profile selection. `profile=hp-envy-ey0xxx-csc3551`,
-  `board=0x103C8A31`.
-- Reset. `Cirrus_Reset_Policy = AUTHORIZED`; the shared GPIO 30 line is driven.
-- Firmware, calibration, DSP boot and ASP configuration. All verified above.
-- Masked `PUP_DONE`. Linux polls the same masked `IRQ1_STATUS1` bit and works,
-  because its PLL locks. Unmasking or polling `RAW_STATUS1` does not create a
-  clock.
-- Boost topology and reset pin differences against Legion. They are real
-  (internal vs external boost, pin 30 vs pin 6) but both are downstream of the
-  missing bit clock.
-
-## Remaining work
-
-The missing piece is codec-side: something on macOS must make the ALC245 emit
-I2S at 48 kHz / 3.072 MHz BCLK. Options, in order of increasing cost:
-
-1. Determine whether the ALC245 digital output is enabled by a vendor
-   coefficient verb sequence that AppleALC can carry in a layout resource.
-2. Determine whether the signal path is instead the AMD ACP (`card 2 acp` in
-   Linux) rather than the HDA codec, which would move the problem to a different
-   controller driver.
-3. If neither is reachable, the clock boundary is not solvable inside
-   CirrusAudioFixup and the amplifier work stays a verified-power-sequence
-   reference implementation.
-
-Evidence needed next: a Linux codec dump while playing, and identification of
-which ALSA card carries the speaker stream.
+Whichever card lists a capture device answers it. If capture is on the HDA card,
+a custom layout combining layout 13's speaker path with layout 11's input path
+is the fix. If capture is on card `acp`, the microphone is out of scope for this
+driver and for AppleALC.
 
 ## Verified fixes on branch `envy-103c8a31`
 

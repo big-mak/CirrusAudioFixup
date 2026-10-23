@@ -123,36 +123,67 @@ route in layout 13; no CS35L41-specific support is involved on the codec side.
 
 ## Open issue: internal microphone
 
-Layout 13 plays audio but publishes no capture device. `system_profiler` lists
-only `Built-in Output`, and there are zero `AppleHDAEngineInput` instances.
+Capture does not work. Two ALC245 layouts were tested on hardware:
 
-Layout 11 did publish `Built-in Input` (2 channels), so the codec capture path
-works under a different layout. Layout 13's `PathMaps` do declare
-`Inputs = [Mic, LineIn]` and a path through nodes 8 -> 35 -> 25 with `Boost = 3`,
-so the route is described but not being realised on this codec configuration.
+| `alcid` | Speakers | `Built-in Input` | Capture |
+| --- | --- | --- | --- |
+| 11 | no | yes (2 ch) | not tested |
+| 12 | yes | yes (2 ch, 48 kHz) | digital silence, peak 0.0 |
+| 13 | yes | no | n/a |
 
-Two competing explanations, not yet separated:
+Layout 12 is the only one that gives both directions, so it is the better base if
+capture is ever fixed. On layout 12 the input engine publishes correctly and the
+controls are live: `IOAudioLevelControlMaxValue = 63`, `IOAudioControlValue = 48`,
+two mute toggles `IOAudioControlValue = 0`. Setting the input volume to 1.0 and
+clearing mute through CoreAudio succeeded (`r=0` for both channels) and a 3 second
+`AVAudioEngine` tap at 48 kHz still returned `peak = 0.0` over 139200 frames.
+Exact zero is the signature of no signal path, not a low gain.
 
-1. The input path described by layout 13 does not match this codec's pin
-   configuration, so AppleHDA builds no input stream.
-2. The internal microphone array on this platform is not on the HDA codec at
-   all. Linux exposes a third card, `acp`
-   (`HP-HPENVYx3602_in_1Laptop15_ey0xxx-Type1ProductConfigId-8A31`), which is
-   the AMD ACP path used for DMIC arrays on some Ryzen laptops. If the mic is
-   there, no AppleALC layout can reach it and a separate ACP/DMIC driver would
-   be needed.
+Layout 12 and 13 both route capture through codec node 25 (`0x19`) via
+`8 -> 35 -> 25` with `Boost = 3`, so AppleHDA is being asked to use the codec's
+own microphone pin.
 
-The cheapest way to separate them is one Linux boot:
+### Where the microphone probably actually lives
+
+The board exposes a second audio controller:
+
+```
++-o ACP@0,5  <class IOPCIDevice, id 0x100000225>
+      "vendor-id"   = <22100000>   // 0x1002 AMD
+      "device-id"   = <e2150000>   // 0x15E2
+      "subsystem-vendor-id" = <3c100000>
+      "class-code"  = <00800400>   // multimedia audio
+      "acpi-path"   = "IOACPIPlane:/_SB/PCI0@0/GP17@80001/ACP@5"
+```
+
+It has no driver attached on macOS. Linux enumerates a card named for this exact
+machine against it:
+
+```
+2 [acp]: acp - acp
+          HP-HPENVYx3602_in_1Laptop15_ey0xxx-Type1ProductConfigId-8A31
+```
+
+That is the AMD Audio Co-Processor, which on Ryzen laptops carries the PDM/DMIC
+microphone array. The DSDT contains no `DMIC` device and the codec `_CRS`/pin
+configuration only describes the analog codec pins, which is consistent with the
+array not being wired to the ALC245 at all.
+
+### Decisive test
+
+One Linux boot settles it:
 
 ```
 arecord -l
 cat /proc/asound/cards
 ```
 
-Whichever card lists a capture device answers it. If capture is on the HDA card,
-a custom layout combining layout 13's speaker path with layout 11's input path
-is the fix. If capture is on card `acp`, the microphone is out of scope for this
-driver and for AppleALC.
+- If a capture device appears on card 0/1 (HDA), the microphone is on the codec
+  and a custom AppleALC layout combining layout 13's speaker path with the
+  working input path is the fix.
+- If capture appears only on card `acp`, the microphone is outside both AppleALC
+  and this driver. It would need an AMD ACP/DMIC driver for macOS, which does
+  not exist.
 
 ## Verified fixes on branch `envy-103c8a31`
 

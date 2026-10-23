@@ -1161,8 +1161,12 @@ bool CirrusAudioFixup::preflightI2CIdentity(const cirrus::platform::AmplifierDri
         char path[256]{};
         int length = sizeof(path);
         const auto& endpoint = board->amplifiers[0].endpoint;
-        if (endpoint.transport != cirrus::core::BusTransportType::I2C || endpoint.tenBitAddress || !mProvider ||
-            !mProvider->getPath(path, &length, gIOServicePlane) || !endpoint.controllerPath || strcmp(path, endpoint.controllerPath)) {
+        const bool havePath = mProvider && mProvider->getPath(path, &length, gIOServicePlane);
+        // "*" is a verified-board wildcard: the live VoodooI2C nub path is unknown
+        // at compile time. Resolve it the same way discovery does.
+        const bool pathMatch = havePath && (!strcmp(endpoint.controllerPath, "*") || !strcmp(path, endpoint.controllerPath));
+        if (endpoint.transport != cirrus::core::BusTransportType::I2C || endpoint.tenBitAddress || !endpoint.controllerPath ||
+            !pathMatch) {
             mAttachment.communication = "RESOURCE_REJECTED";
             recordAttachmentFailure("RESOURCE", "I2C_ENDPOINT_UNMATCHED", kIOReturnUnsupported);
             return false;

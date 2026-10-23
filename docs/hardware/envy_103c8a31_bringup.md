@@ -121,28 +121,28 @@ correct.
 AppleALC needs no changes. Its ALC245 resources already contain the required
 route in layout 13; no CS35L41-specific support is involved on the codec side.
 
-## Internal microphone: out of scope for this driver
+## Internal microphone: works, on the AMD ACP
 
-Capture does not work, and the evidence says the internal array is not connected
-to the ALC245 at all. Three ALC245 layouts were tested on hardware:
+The internal array captures correctly and is **not** connected to the ALC245.
+Three ALC245 layouts were tested on hardware:
 
-| `alcid` | Speakers | `Built-in Input` | Capture |
+| `alcid` | Speakers | `Built-in Input` | Notes |
 | --- | --- | --- | --- |
-| 11 | no | yes (2 ch) | not tested |
-| 12 | yes | yes (2 ch, 48 kHz) | digital silence, peak 0.0 |
-| 13 | yes | no | n/a |
+| 11 | no | yes (2 ch) | codec analog headset pin only |
+| 12 | yes, but worse | yes | crashed during testing, see below |
+| 13 | yes | no | use this |
 
-On layout 12 the input engine publishes and its controls are live
-(`IOAudioLevelControlMaxValue = 63`, `IOAudioControlValue = 48`, two mute toggles
-at `IOAudioControlValue = 0`). Forcing the input volume to 1.0 and clearing mute
-through CoreAudio succeeded (`r=0` on both channels), yet a 3 second
-`AVAudioEngine` tap at 48 kHz still returned `peak = 0.0` over 139200 frames.
-Exact zero across that many frames is the signature of a missing signal path, not
-a low gain.
+`Built-in Input` on layouts 11 and 12 is the codec's analog microphone pin, not
+the internal array. Both layouts route capture through codec node 25 (`0x19`) via
+`8 -> 35 -> 25` with `Boost = 3`; that pin is the 3.5 mm headset input and
+captures silence with nothing plugged in.
 
-Both layouts route capture through codec node 25 (`0x19`) via `8 -> 35 -> 25` with
-`Boost = 3`, so AppleHDA is driving the codec's analog microphone pin. That pin is
-the 3.5 mm headset input, not the built-in array.
+> **Correction.** An earlier revision of this document concluded the internal
+> microphone was unavailable. That conclusion came from a `peak = 0.0` capture
+> measurement which was invalid: the test process was launched over SSH, and TCC
+> denies microphone access to `sshd-keygen-wrapper`, so CoreAudio handed back a
+> zero-filled buffer with no error. The microphone was working the whole time.
+> See "Verifying capture" below.
 
 ### The array is on the AMD ACP
 
@@ -183,15 +183,42 @@ children), there is no `DMIC`/`PDM` device anywhere in the namespace, and the
 codec pin configuration describes only analog codec pins. The firmware does not
 describe a codec-attached digital microphone.
 
-### Consequence
+### The macOS driver
 
-The internal microphone would need an AMD ACP PDM capture driver on macOS, backed
-by the ACP DMA engine at `1022:15E2`. Neither AppleALC nor CirrusAudioFixup can
-provide that, and no such macOS driver is known to exist. Layouts that expose
-`Built-in Input` only expose the analog headset pin, which captures silence when
-nothing is plugged in.
+`AMDMicrophone-Continuity` (fork of `qhuyduong/AMDMicrophone`) drives the ACP PDM
+array. It matches `IOPCIMatch 0x15e21022` / `IOPCIClassMatch 0x04800000` and gates
+on PCI revision `0x01`, which this board reports. It must live in
+`/Library/Extensions`, not `EFI/OC/Kexts`: `IOAudioFamily` loads too late for an
+OpenCore-injected bundle. Installation requirements on this machine:
 
-Treat this as a hardware/driver-availability limit, not an open bug in this kext.
+| Requirement | Value |
+| --- | --- |
+| `csr-active-config` | `0x201` (`UNTRUSTED_KEXTS \| UNAPPROVED_KEXTS`) |
+| `NVRAM → Delete` | must list `csr-active-config`, or OpenCore never overwrites the firmware value |
+| `spctl kext-consent` | relieved by `CSR_ALLOW_UNAPPROVED_KEXTS` |
+| Rebuild | `sudo kextcache -i /`, then **two** reboots |
+
+Two reboots, not one: `kextcache` stashes the new bundle into `AuxKC` after the
+boot that is already running, so the first restart boots the old binary and the
+second loads the new one. Confirm with `kmutil showloaded | grep -i amdmic` and
+compare the UUID against `dwarfdump --uuid` on the installed bundle. A changed
+binary UUID also triggers a new Privacy & Security approval prompt; until it is
+accepted the previously approved copy stays loaded.
+
+### Verifying capture
+
+The ACP ring is the ground truth, because TCC will silently hand a zero-filled
+buffer to any unapproved process. Do **not** validate from an SSH session:
+
+```
+tccd: Policy disallows prompt for Sub:{/usr/libexec/sshd-keygen-wrapper}
+      access to kTCCServiceMicrophone denied
+```
+
+A capture test run over SSH returns `peak = 0.0` with no error and looks exactly
+like dead hardware. Grant microphone access to the terminal application (or test
+from a GUI app) before trusting any measurement. The input level meter in System
+Settings → Sound is a reliable check and needs no permission grant.
 
 ## Layout 12 is not a safe default
 

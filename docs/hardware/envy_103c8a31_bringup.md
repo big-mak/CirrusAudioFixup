@@ -121,9 +121,10 @@ correct.
 AppleALC needs no changes. Its ALC245 resources already contain the required
 route in layout 13; no CS35L41-specific support is involved on the codec side.
 
-## Open issue: internal microphone
+## Internal microphone: out of scope for this driver
 
-Capture does not work. Two ALC245 layouts were tested on hardware:
+Capture does not work, and the evidence says the internal array is not connected
+to the ALC245 at all. Three ALC245 layouts were tested on hardware:
 
 | `alcid` | Speakers | `Built-in Input` | Capture |
 | --- | --- | --- | --- |
@@ -131,21 +132,21 @@ Capture does not work. Two ALC245 layouts were tested on hardware:
 | 12 | yes | yes (2 ch, 48 kHz) | digital silence, peak 0.0 |
 | 13 | yes | no | n/a |
 
-Layout 12 is the only one that gives both directions, so it is the better base if
-capture is ever fixed. On layout 12 the input engine publishes correctly and the
-controls are live: `IOAudioLevelControlMaxValue = 63`, `IOAudioControlValue = 48`,
-two mute toggles `IOAudioControlValue = 0`. Setting the input volume to 1.0 and
-clearing mute through CoreAudio succeeded (`r=0` for both channels) and a 3 second
+On layout 12 the input engine publishes and its controls are live
+(`IOAudioLevelControlMaxValue = 63`, `IOAudioControlValue = 48`, two mute toggles
+at `IOAudioControlValue = 0`). Forcing the input volume to 1.0 and clearing mute
+through CoreAudio succeeded (`r=0` on both channels), yet a 3 second
 `AVAudioEngine` tap at 48 kHz still returned `peak = 0.0` over 139200 frames.
-Exact zero is the signature of no signal path, not a low gain.
+Exact zero across that many frames is the signature of a missing signal path, not
+a low gain.
 
-Layout 12 and 13 both route capture through codec node 25 (`0x19`) via
-`8 -> 35 -> 25` with `Boost = 3`, so AppleHDA is being asked to use the codec's
-own microphone pin.
+Both layouts route capture through codec node 25 (`0x19`) via `8 -> 35 -> 25` with
+`Boost = 3`, so AppleHDA is driving the codec's analog microphone pin. That pin is
+the 3.5 mm headset input, not the built-in array.
 
-### Where the microphone probably actually lives
+### The array is on the AMD ACP
 
-The board exposes a second audio controller:
+The board exposes a second audio controller with no driver attached on macOS:
 
 ```
 +-o ACP@0,5  <class IOPCIDevice, id 0x100000225>
@@ -156,34 +157,50 @@ The board exposes a second audio controller:
       "acpi-path"   = "IOACPIPlane:/_SB/PCI0@0/GP17@80001/ACP@5"
 ```
 
-It has no driver attached on macOS. Linux enumerates a card named for this exact
-machine against it:
+Linux enumerates a card named for this exact machine against it:
 
 ```
 2 [acp]: acp - acp
           HP-HPENVYx3602_in_1Laptop15_ey0xxx-Type1ProductConfigId-8A31
 ```
 
-That is the AMD Audio Co-Processor, which on Ryzen laptops carries the PDM/DMIC
-microphone array. The DSDT contains no `DMIC` device and the codec `_CRS`/pin
-configuration only describes the analog codec pins, which is consistent with the
-array not being wired to the ALC245 at all.
+Independent corroboration that the array hangs off `1022:15E2` rather than the
+codec:
 
-### Decisive test
+- A Linux report for `HP ENVY x360 15-ey0013dx`, subsystem `103C:8A31`, lists
+  `Device-2: AMD ACP/ACP3X/ACP6x Audio Coprocessor driver: snd_rn_pci_acp3x
+  chip-ID: 1022:15e2` alongside `card 1: Generic_1 ... ALC245 Analog`.
+- Kernel Bugzilla #215119 states the AMD array microphone is "directly connected
+  to the AMD CPU via the AMD ACP (Audio Co-Processor, PCI ID 1022:15e2)" and is
+  driven by `snd_rn_pci_acp3x`.
+- A Windows driver inventory for `HP ENVY x360 2-in-1 Laptop 15-ey0xxx` lists
+  `Microphone Array (AMD Audio Device)` and `AMD Audio CoProcessor` separately
+  from `Realtek(R) Audio`. Windows naming the array an *AMD Audio Device* rather
+  than a Realtek one matches the ACP path.
 
-One Linux boot settles it:
+The DSDT agrees: `Device (ACP)` is bare (`_ADR 0x05`, a `_WOV` method, no
+children), there is no `DMIC`/`PDM` device anywhere in the namespace, and the
+codec pin configuration describes only analog codec pins. The firmware does not
+describe a codec-attached digital microphone.
 
-```
-arecord -l
-cat /proc/asound/cards
-```
+### Consequence
 
-- If a capture device appears on card 0/1 (HDA), the microphone is on the codec
-  and a custom AppleALC layout combining layout 13's speaker path with the
-  working input path is the fix.
-- If capture appears only on card `acp`, the microphone is outside both AppleALC
-  and this driver. It would need an AMD ACP/DMIC driver for macOS, which does
-  not exist.
+The internal microphone would need an AMD ACP PDM capture driver on macOS, backed
+by the ACP DMA engine at `1022:15E2`. Neither AppleALC nor CirrusAudioFixup can
+provide that, and no such macOS driver is known to exist. Layouts that expose
+`Built-in Input` only expose the analog headset pin, which captures silence when
+nothing is plugged in.
+
+Treat this as a hardware/driver-availability limit, not an open bug in this kext.
+
+## Layout 12 is not a safe default
+
+Layout 13 is the only layout validated for speaker playback. Layout 12 was tried
+because it additionally publishes `Built-in Input`, and while speakers did play,
+output sounded worse than layout 13 and the machine crashed during the test. No
+panic report was collected, so the cause is unestablished: it could be the
+Lenovo-labelled layout mismatching this HP board, or something in the amplifier
+path. Until a panic log says otherwise, **use layout 13**.
 
 ## Verified fixes on branch `envy-103c8a31`
 
